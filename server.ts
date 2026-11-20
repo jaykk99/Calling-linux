@@ -774,7 +774,12 @@ async function originateAsteriskAmiCall(params: {
   const amiHost = process.env.AMI_HOST || '127.0.0.1';
   const amiPort = parseInt(process.env.AMI_PORT || '5038', 10);
   const amiUser = process.env.AMI_USER || 'linuxcarrier';
-  const amiSecret = process.env.AMI_SECRET || 'ChangeMeStrongAmiSecret';
+  const amiSecret = process.env.AMI_SECRET;
+  if (!amiSecret) {
+    // Fail closed: never originate with a fallback secret. Without
+    // AMI_SECRET there is no safe credential, so refuse before dialing.
+    return { success: false, amiConnected: false, detail: 'Asterisk AMI is not configured: set AMI_SECRET (with AMI_USER/AMI_HOST) to use PBX originate.' };
+  }
 
   const cleanDest = params.toPhone.replace(/[^0-9]/g, '');
   const cleanFrom = params.fromE164.replace(/[^0-9+]/g, '');
@@ -1033,13 +1038,21 @@ app.post('/api/webhooks/inbound-sms', (req: Request, res: Response) => {
     }
   }
 
-  if (secret) {
-    const rawBody = (req as any).rawBody as Buffer;
-    const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody || '').digest('hex');
-    if (!sigHeader || !crypto.timingSafeEqual(Buffer.from(sigHeader), Buffer.from(expected))) {
-      res.status(401).json({ error: 'Invalid X-Carrier-Signature-256 HMAC signature' });
-      return;
-    }
+  if (!secret) {
+    // Fail closed: without a configured secret there is no way to verify
+    // the caller, so unsigned inbound SMS is refused outright. Set
+    // CARRIER_HMAC_SECRET or /etc/apex-carrier.secret to enable this hook.
+    res.status(503).json({ error: 'Inbound SMS webhook is not configured: set CARRIER_HMAC_SECRET or /etc/apex-carrier.secret' });
+    return;
+  }
+
+  const rawBody = (req as any).rawBody as Buffer;
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody || '').digest('hex');
+  const sigBuf = Buffer.from(sigHeader || '');
+  const expBuf = Buffer.from(expected);
+  if (!sigHeader || sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    res.status(401).json({ error: 'Invalid X-Carrier-Signature-256 HMAC signature' });
+    return;
   }
 
   const { fromPhone, targetNumberId, body, authResults } = req.body;
