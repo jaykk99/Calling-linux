@@ -1,0 +1,6 @@
+{
+  "name": "Linux Carrier 1000 - SMTP & Telephony Gateway",
+  "description": "Enterprise Linux virtual phone number carrier system powering 1,000 working numbers via public domain delegation, SMTP Port 25 infrastructure, trusted TLS certificates, and Postfix mail routing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

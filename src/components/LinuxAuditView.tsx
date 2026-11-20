@@ -1,0 +1,322 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Cpu,
+  HardDrive,
+  RefreshCw,
+  CheckCircle2,
+  AlertTriangle,
+  Play,
+  Terminal,
+  PhoneCall,
+  Mail
+} from 'lucide-react';
+import { SystemCapabilities, BenchmarkResult } from '../types';
+
+export const LinuxAuditView: React.FC = () => {
+  const [caps, setCaps] = useState<SystemCapabilities | null>(null);
+  const [loadingCaps, setLoadingCaps] = useState(true);
+  const [benchmark, setBenchmark] = useState<BenchmarkResult | null>(null);
+  const [runningBench, setRunningBench] = useState(false);
+
+  const loadCapabilities = useCallback(async () => {
+    setLoadingCaps(true);
+    try {
+      const res = await fetch('/api/system/capabilities');
+      if (res.ok) {
+        setCaps(await res.json());
+      }
+    } finally {
+      setLoadingCaps(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCapabilities();
+  }, [loadCapabilities]);
+
+  const run1000Benchmark = async () => {
+    setRunningBench(true);
+    try {
+      const res = await fetch('/api/system/benchmark', { method: 'POST' });
+      if (res.ok) {
+        setBenchmark(await res.json());
+      }
+    } finally {
+      setRunningBench(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header & Live Benchmark Trigger */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-xs text-cyan-400 font-medium">
+            <Cpu className="w-3.5 h-3.5" />
+            <span>Real Linux Host Inspection & 1,000-DID Concurrency Audit</span>
+          </div>
+          <h2 className="text-xl font-bold text-slate-50">
+            Live Linux Runtime & 1,000 Calling + SMS Capacity
+          </h2>
+          <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
+            Directly inspects this Linux machine&apos;s installed mail/SIP daemons, open sockets, kernel file descriptors, and runs a live 1,000-number config compilation & MIME throughput benchmark without simulation.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            onClick={loadCapabilities}
+            disabled={loadingCaps}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingCaps ? 'animate-spin' : ''}`} />
+            Re-Scan Host
+          </button>
+
+          <button
+            onClick={run1000Benchmark}
+            disabled={runningBench}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <Play className="w-3.5 h-3.5" />
+            {runningBench ? 'Benchmarking 1,000 DIDs...' : 'Run 1,000-Line Benchmark'}
+          </button>
+        </div>
+      </div>
+
+      {/* Live 1,000-Line Benchmark Result */}
+      {benchmark && (
+        <div className="bg-slate-900 border border-cyan-500/40 rounded-xl p-6 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-4">
+            <div>
+              <h3 className="text-base font-semibold text-slate-100">
+                1,000-Number Calling & SMS Host Benchmark Results
+              </h3>
+              <p className="text-xs text-cyan-300 mt-0.5">{benchmark.verdict}</p>
+            </div>
+            <span className="text-xs font-mono text-slate-400 tabular-nums">
+              Total: {benchmark.totalDurationMs} ms
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4">
+            <div>
+              <div className="text-xs text-slate-400">DIDs Indexed</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-slate-100 mt-0.5">
+                {benchmark.numbersTested}
+              </div>
+              <div className="text-[11px] font-mono text-slate-500">{benchmark.didIndexMs} ms</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">PJSIP 1K Compile</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-cyan-400 mt-0.5">
+                {benchmark.pjsipConfigGenMs} ms
+              </div>
+              <div className="text-[11px] text-slate-500">1,000 SIP endpoints</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">Postfix 1K Map</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-emerald-400 mt-0.5">
+                {benchmark.postfixMapGenMs} ms
+              </div>
+              <div className="text-[11px] text-slate-500">1,000 SMTP aliases</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">1K MIME + HMAC</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-slate-100 mt-0.5">
+                {benchmark.mimeBuild1000Ms} ms
+              </div>
+              <div className="text-[11px] text-slate-500">SHA-256 signed</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">Disk State Flush</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-slate-200 mt-0.5">
+                {benchmark.diskFlushMs} ms
+              </div>
+              <div className="text-[11px] text-slate-500">RSS {benchmark.rssMb} MB</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">Max Active Calls</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-cyan-300 mt-0.5">
+                ~{benchmark.estimatedMaxConcurrentCalls.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-slate-500">Simultaneous RTP</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">SMS Engine Cap</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-emerald-300 mt-0.5">
+                {benchmark.estimatedMaxSmsPerMin.toLocaleString()}/m
+              </div>
+              <div className="text-[11px] text-slate-500">Payload throughput</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Warnings if Postfix/Asterisk are not yet installed on this specific machine */}
+      {caps && caps.readiness1000.warnings.length > 0 && (
+        <div className="bg-slate-900 border border-amber-500/40 rounded-xl p-5 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-amber-200">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Host Prerequisites Required for Live Calling & SMTP on This Machine</span>
+          </div>
+          <ul className="space-y-1.5 text-xs text-slate-300">
+            {caps.readiness1000.warnings.map((w, idx) => (
+              <li key={idx} className="flex items-start gap-2">
+                <span className="font-mono text-amber-400 shrink-0">0{idx + 1}.</span>
+                <span>{w}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {caps && (
+        <>
+          {/* Hardware & Kernel Limits */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-6 bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                <HardDrive className="w-4 h-4 text-cyan-400" />
+                <span>Linux Kernel & Hardware Telemetry</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 text-xs">
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+                  <div className="text-slate-500">Hostname & OS</div>
+                  <div className="font-mono text-slate-100 mt-1 truncate">
+                    {caps.hostname} ({caps.platform} {caps.arch})
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-400 truncate mt-0.5">{caps.release}</div>
+                </div>
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+                  <div className="text-slate-500">CPU & Memory</div>
+                  <div className="font-mono text-slate-100 mt-1">
+                    {caps.cpuCores} vCPU · {caps.totalMemMb} MB RAM
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-400 mt-0.5">
+                    {caps.freeMemMb} MB free · load {caps.loadAvg.map((l) => l.toFixed(2)).join(' ')}
+                  </div>
+                </div>
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+                  <div className="text-slate-500">File Descriptor Limits</div>
+                  <div className="font-mono text-slate-100 mt-1">
+                    ulimit -n: {caps.kernelLimits.nofileLimit}
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-400 mt-0.5">
+                    fs.file-max: {caps.kernelLimits.fileMax}
+                  </div>
+                </div>
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+                  <div className="text-slate-500">Socket Queue & Ports</div>
+                  <div className="font-mono text-slate-100 mt-1">
+                    somaxconn: {caps.kernelLimits.somaxconn}
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-400 mt-0.5">
+                    Ephemeral: {caps.kernelLimits.ephemeralPorts}
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-400 pt-1">
+                Persistent State File: <span className="font-mono text-slate-200">{caps.persistencePath}</span>
+              </div>
+            </div>
+
+            {/* Live Socket Listeners */}
+            <div className="lg:col-span-6 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                  <Terminal className="w-4 h-4 text-cyan-400" />
+                  <span>Live Local Service Sockets (127.0.0.1)</span>
+                </div>
+                <span className="text-xs text-slate-400">Real TCP Connect Scan</span>
+              </div>
+              <div className="divide-y divide-slate-800/80">
+                {caps.ports.map((p) => (
+                  <div key={p.port} className="py-2.5 px-5 flex items-center justify-between text-xs">
+                    <div>
+                      <span className="font-mono font-semibold text-slate-100">
+                        {p.protocol} /{p.port}
+                      </span>
+                      <span className="text-slate-400 ml-2.5">{p.service}</span>
+                    </div>
+                    {p.listening ? (
+                      <span className="inline-flex items-center gap-1.5 font-medium text-emerald-400">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        Listening
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 font-mono">Not Running</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Installed Linux Carrier Binaries */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-slate-100">
+                Installed Linux Mail & Telephony Daemons
+              </h3>
+              <span className="text-xs text-slate-400">Checked via filesystem & PATH</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/60 text-xs font-medium text-slate-400">
+                    <th className="py-2.5 px-5">Binary</th>
+                    <th className="py-2.5 px-5">System Role</th>
+                    <th className="py-2.5 px-5">Detected Path</th>
+                    <th className="py-2.5 px-5 text-right">State</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70 text-xs">
+                  {caps.binaries.map((b) => (
+                    <tr key={b.name} className="hover:bg-slate-800/30">
+                      <td className="py-2.5 px-5 font-mono font-semibold text-slate-100">{b.name}</td>
+                      <td className="py-2.5 px-5 text-slate-300">{b.role}</td>
+                      <td className="py-2.5 px-5 font-mono text-slate-400">{b.path || '—'}</td>
+                      <td className="py-2.5 px-5 text-right">
+                        {b.installed ? (
+                          <span className="text-emerald-400 font-medium">Installed</span>
+                        ) : (
+                          <span className="text-amber-400">Missing</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Calling vs SMS 1,000-Line Architecture Breakdown */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-cyan-400">
+                <PhoneCall className="w-4 h-4" />
+                <span>1,000-Number Voice Calling Requirements (Asterisk PJSIP)</span>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Registering 1,000 DIDs in Asterisk PJSIP takes under 40 MB RAM. Handling <strong className="text-slate-200">1,000 simultaneous active calls</strong> requires UDP RTP ports <span className="font-mono text-slate-200">10000–20000</span>, <span className="font-mono text-slate-200">ulimit -n 65535</span>, ~85 Mbps symmetric bandwidth (G.711/Opus), ~2.2 GB free RAM, and a SIP trunk provider (Telnyx, Twilio Elastic SIP, Flowroute, or VoIP.ms) for PSTN termination.
+              </p>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400">
+                <Mail className="w-4 h-4" />
+                <span>1,000-Number SMS Requirements (Postfix + OpenDKIM)</span>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Postfix virtual alias tables (<span className="font-mono text-slate-200">hash:/etc/postfix/virtual</span>) handle 1,000+ DIDs in constant O(1) lookup time with minimal RAM. Reliable public carrier SMS delivery requires unblocked TCP Port 25, matching PTR Reverse DNS, OpenDKIM, SPF, DMARC, and TLS 1.3 certificates.
+              </p>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
