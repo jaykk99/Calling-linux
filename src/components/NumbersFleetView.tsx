@@ -263,27 +263,41 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
             <p className="text-xs text-slate-400 leading-relaxed">
               Re-delegate all 1,000 numbers to your domain or export Postfix SMTP maps and 1,000 self-hosted Asterisk PJSIP endpoints.
             </p>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => setShowBatchModal(true)}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
                 Re-Provision
               </button>
               <a
+                href={`/api/export/unified-identities?domain=${encodeURIComponent(domain)}`}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Unified 1K JSON
+              </a>
+              <a
                 href={`/api/export/postfix-virtual?domain=${encodeURIComponent(domain)}`}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-cyan-300 bg-cyan-950/50 hover:bg-cyan-900/50 border border-cyan-800/60 rounded-lg transition-colors whitespace-nowrap"
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-cyan-300 bg-cyan-950/50 hover:bg-cyan-900/50 border border-cyan-800/60 rounded-lg transition-colors whitespace-nowrap"
               >
                 <Download className="w-3.5 h-3.5" />
                 Postfix Map
               </a>
               <a
-                href={`/api/export/asterisk-pjsip?domain=${encodeURIComponent(domain)}`}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-300 bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/60 rounded-lg transition-colors whitespace-nowrap"
+                href={`/api/export/dovecot-users?domain=${encodeURIComponent(domain)}`}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-cyan-300 bg-cyan-950/50 hover:bg-cyan-900/50 border border-cyan-800/60 rounded-lg transition-colors whitespace-nowrap"
               >
                 <Download className="w-3.5 h-3.5" />
-                PJSIP 1K
+                Dovecot Users
+              </a>
+              <a
+                href={`/api/export/asterisk-pjsip?domain=${encodeURIComponent(domain)}`}
+                className="col-span-2 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-300 bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/60 rounded-lg transition-colors whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Asterisk PJSIP 1,000 Endpoints
               </a>
             </div>
           </div>
@@ -497,7 +511,7 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
           <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-md p-6 space-y-5 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
-                <h3 className="text-base font-semibold text-slate-100">Configure Self-Hosted DID</h3>
+                <h3 className="text-base font-semibold text-slate-100">Unified Agent / DID Identity</h3>
                 <p className="text-xs font-mono text-cyan-400 mt-0.5">{editingNumber.phoneNumber}</p>
               </div>
               <button
@@ -506,6 +520,21 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
               >
                 <X className="w-4 h-4" />
               </button>
+            </div>
+
+            <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-1.5 text-[11px] font-mono">
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">Email / IMAP:</span>
+                <span className="text-slate-200 truncate">{editingNumber.imapMailbox || editingNumber.assignedEmail}</span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">SIP Endpoint:</span>
+                <span className="text-cyan-300 truncate">{editingNumber.sipUri}</span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">MCP Credential:</span>
+                <span className="text-emerald-300">{editingNumber.mcpTokenPrefix} ({editingNumber.quotaMb || 512} MB)</span>
+              </div>
             </div>
 
             <form onSubmit={handleSaveEdit} className="space-y-4">

@@ -4,8 +4,11 @@ export interface VirtualNumber {
   e164: string;
   extension: number;
   assignedEmail: string;
+  imapMailbox: string;
   sipUri: string;
   sipUsername: string;
+  mcpTokenPrefix: string;
+  quotaMb: number;
   routingMode: 'self-hosted' | 'federated-sip' | 'webhook';
   status: 'active' | 'idle' | 'reserved' | 'forwarding';
   label: string;
@@ -49,6 +52,32 @@ export interface CallRecord {
   transport: string;
   channel?: string;
   detail: string;
+}
+
+export interface ImapMailboxMessage {
+  uid: string;
+  from: string;
+  to: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  source: 'imap-tls' | 'imap-plain' | 'local-maildir';
+}
+
+export interface E2eCheckItem {
+  id: string;
+  name: string;
+  status: 'passed' | 'warning' | 'failed';
+  durationMs: number;
+  detail: string;
+}
+
+export interface E2eVerificationReport {
+  timestamp: string;
+  passedCount: number;
+  warningCount: number;
+  failedCount: number;
+  checks: E2eCheckItem[];
 }
 
 export interface DiagnosticCheck {
@@ -107,6 +136,8 @@ export interface SystemCapabilities {
     sipActive: boolean;
     smtpListenPort: number | null;
     smtpActive: boolean;
+    turnConfigured: boolean;
+    imapListening: boolean;
     webrtcOnlineLines: string[];
     sipRegisteredLines: string[];
   };

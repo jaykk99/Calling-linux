@@ -16,9 +16,10 @@ import {
   MicOff,
   Mail,
   AlertTriangle,
-  Radio
+  Radio,
+  Inbox
 } from 'lucide-react';
-import { SmsMessage, CallRecord, VirtualNumber } from '../types';
+import { SmsMessage, CallRecord, VirtualNumber, ImapMailboxMessage } from '../types';
 
 interface LiveConsoleViewProps {
   domain: string;
@@ -38,7 +39,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
   initialComposeNumber,
   refreshTrigger
 }) => {
-  const [subView, setSubView] = useState<'sms' | 'voice'>('sms');
+  const [subView, setSubView] = useState<'sms' | 'voice' | 'imap'>('sms');
 
   // SMS State
   const [messages, setMessages] = useState<SmsMessage[]>([]);
@@ -86,6 +87,18 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
   const [dialingAmi, setDialingAmi] = useState(false);
   const [amiBanner, setAmiBanner] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // Coturn ICE & Dovecot IMAP Mailbox State
+  const [turnEnabled, setTurnEnabled] = useState(false);
+  const [turnHost, setTurnHost] = useState<string | null>(null);
+  const [imapHost, setImapHost] = useState('127.0.0.1');
+  const [imapPort, setImapPort] = useState('993');
+  const [imapUseTls, setImapUseTls] = useState(true);
+  const [imapUser, setImapUser] = useState(`12015550001@${domain}`);
+  const [imapPassword, setImapPassword] = useState('');
+  const [imapMessages, setImapMessages] = useState<ImapMailboxMessage[]>([]);
+  const [imapSyncing, setImapSyncing] = useState(false);
+  const [imapStatus, setImapStatus] = useState<{ ok: boolean; text: string } | null>(null);
+
   useEffect(() => {
     myLineRef.current = myLine;
   }, [myLine]);
@@ -100,6 +113,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
 
   useEffect(() => {
     setTargetDomain(domain);
+    setImapUser((prev) => (prev.includes('@') ? `${prev.split('@')[0]}@${domain}` : `12015550001@${domain}`));
   }, [domain]);
 
   useEffect(() => {
@@ -107,6 +121,7 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
       setFromNumber(initialComposeNumber.phoneNumber);
       setMyLine(initialComposeNumber.e164);
       setAmiFrom(initialComposeNumber.e164);
+      setImapUser(initialComposeNumber.imapMailbox || initialComposeNumber.assignedEmail);
     }
   }, [initialComposeNumber]);
 
@@ -160,11 +175,25 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
     }
   }, []);
 
+  const fetchIceConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/rtc/ice-config');
+      if (res.ok) {
+        const data = await res.json();
+        setTurnEnabled(Boolean(data.turnEnabled));
+        setTurnHost(data.turnHost || null);
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
   useEffect(() => {
     fetchMessages();
     fetchCalls();
     fetchPeers();
-  }, [fetchMessages, fetchCalls, fetchPeers, refreshTrigger]);
+    fetchIceConfig();
+  }, [fetchMessages, fetchCalls, fetchPeers, fetchIceConfig, refreshTrigger]);
 
   const cleanupPeerConnection = useCallback(() => {
     if (pcRef.current) {
@@ -201,9 +230,22 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
 
   const createPeerConnection = useCallback(
     async (remoteE164: string, callId: string) => {
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      });
+      let iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+      try {
+        const iceRes = await fetch('/api/rtc/ice-config');
+        if (iceRes.ok) {
+          const iceData = await iceRes.json();
+          if (Array.isArray(iceData.iceServers) && iceData.iceServers.length > 0) {
+            iceServers = iceData.iceServers;
+          }
+          setTurnEnabled(Boolean(iceData.turnEnabled));
+          setTurnHost(iceData.turnHost || null);
+        }
+      } catch {
+        // Fallback to STUN
+      }
+
+      const pc = new RTCPeerConnection({ iceServers });
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       localStreamRef.current = stream;
@@ -516,6 +558,37 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
     }
   };
 
+  const handleSyncImap = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setImapSyncing(true);
+    setImapStatus(null);
+    try {
+      const res = await fetch('/api/mailboxes/imap-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: imapHost,
+          port: parseInt(imapPort, 10) || 993,
+          username: imapUser,
+          password: imapPassword,
+          useTls: imapUseTls
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setImapMessages(data.messages || []);
+        setImapStatus({
+          ok: true,
+          text: `Synced ${data.messages?.length || 0} messages from ${data.mailbox} (${data.source})`
+        });
+      } else {
+        setImapStatus({ ok: false, text: data.error || 'Failed to sync IMAP mailbox.' });
+      }
+    } finally {
+      setImapSyncing(false);
+    }
+  };
+
   const filteredMessages = messages.filter((m) =>
     directionFilter === 'all' ? true : m.direction === directionFilter
   );
@@ -551,15 +624,150 @@ export const LiveConsoleView: React.FC<LiveConsoleViewProps> = ({
             <PhoneCall className="w-3.5 h-3.5" />
             Self-Hosted Voice Calling (WebRTC &amp; SIP)
           </button>
+          <button
+            onClick={() => setSubView('imap')}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              subView === 'imap' ? 'bg-slate-800 text-cyan-400' : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Inbox className="w-3.5 h-3.5" />
+            Dovecot IMAP Mailboxes
+          </button>
         </div>
 
         <div className="text-xs text-slate-400 font-mono px-2">
-          Zero External Carrier · Domain: {domain}
+          {turnEnabled ? `TURN Active (${turnHost})` : 'STUN Direct'} · Domain: {domain}
           {embeddedSipPort ? ` · SIP UDP :${embeddedSipPort}` : ''}
         </div>
       </div>
 
-      {subView === 'voice' ? (
+      {subView === 'imap' ? (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-5">
+            <div className="space-y-1">
+              <h2 className="text-base font-semibold text-slate-100">Dovecot IMAPS / Maildir Sync</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Connects directly over RFC 3501 IMAP/IMAPS (`993`/`143`) or local Linux Maildir (`/var/mail/vhosts`) for any of the 1,000 unified agent identities.
+              </p>
+            </div>
+
+            <form onSubmit={handleSyncImap} className="space-y-3.5">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="col-span-2">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">IMAP Host</label>
+                  <input
+                    type="text"
+                    required
+                    value={imapHost}
+                    onChange={(e) => setImapHost(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Port</label>
+                  <input
+                    type="text"
+                    required
+                    value={imapPort}
+                    onChange={(e) => setImapPort(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Mailbox Identity</label>
+                <input
+                  type="text"
+                  required
+                  value={imapUser}
+                  onChange={(e) => setImapUser(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Dovecot Password (optional for local Maildir)
+                </label>
+                <input
+                  type="password"
+                  value={imapPassword}
+                  onChange={(e) => setImapPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full px-3 py-2 text-xs font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={imapUseTls}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setImapUseTls(checked);
+                    setImapPort(checked ? '993' : '143');
+                  }}
+                  className="rounded border-slate-700 bg-slate-950 text-cyan-400"
+                />
+                <span>Use IMAPS TLS (port 993)</span>
+              </label>
+
+              {imapStatus && (
+                <div
+                  className={`p-3 rounded-lg border text-xs flex items-start gap-2 ${
+                    imapStatus.ok
+                      ? 'bg-emerald-950/50 border-emerald-800/60 text-emerald-300'
+                      : 'bg-rose-950/40 border-rose-700/50 text-rose-200'
+                  }`}
+                >
+                  {!imapStatus.ok && <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
+                  <span>{imapStatus.text}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={imapSyncing}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <Inbox className="w-3.5 h-3.5" />
+                {imapSyncing ? 'Syncing Dovecot INBOX...' : 'Sync Real IMAP Mailbox'}
+              </button>
+            </form>
+          </div>
+
+          <div className="lg:col-span-8 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800">
+              <h2 className="text-base font-semibold text-slate-100">Independent Dovecot INBOX ({imapUser})</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Live RFC 3501 FETCH &amp; local `/var/mail/vhosts` Maildir reader
+              </p>
+            </div>
+            <div className="divide-y divide-slate-800/80">
+              {imapMessages.length === 0 ? (
+                <div className="py-16 text-center px-6">
+                  <p className="text-sm font-medium text-slate-300">No IMAP messages synced yet</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Click Sync Real IMAP Mailbox after provisioning Dovecot via the Deployment installer.
+                  </p>
+                </div>
+              ) : (
+                imapMessages.map((m) => (
+                  <div key={m.uid} className="p-5 space-y-1.5 hover:bg-slate-800/30">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-semibold text-slate-100">{m.subject}</span>
+                      <span className="font-mono text-slate-400">{m.date}</span>
+                    </div>
+                    <div className="text-xs font-mono text-cyan-400">From: {m.from}</div>
+                    <p className="text-xs text-slate-300 leading-relaxed">{m.snippet}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : subView === 'voice' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left Column: Live Browser WebRTC Softphone + Optional Asterisk AMI */}
           <div className="lg:col-span-5 space-y-6">

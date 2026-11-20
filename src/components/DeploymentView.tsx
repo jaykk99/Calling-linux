@@ -20,6 +20,8 @@ interface DeploymentViewProps {
 type ConfigTab =
   | 'main_cf'
   | 'master_cf'
+  | 'dovecot_imap'
+  | 'coturn_turn'
   | 'asterisk_pjsip'
   | 'dns_dkim'
   | 'mta_sts'
@@ -29,7 +31,9 @@ type ConfigTab =
   | 'verify_cmds';
 
 function isPrivateOrCgnatIp(ip: string): boolean {
-  const parts = ip.trim().split('.').map(Number);
+  const clean = ip.trim().toLowerCase();
+  if (clean === 'auto') return false;
+  const parts = clean.split('.').map(Number);
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return true;
   const [a, b] = parts;
   if (a === 10 || a === 127 || a === 0 || a >= 224) return true;
@@ -51,12 +55,13 @@ export const DeploymentView: React.FC<DeploymentViewProps> = ({
 
   // Hardened Public-Network Security Profile Controls
   const [networkMode, setNetworkMode] = useState<'direct-public' | 'wireguard-edge'>('direct-public');
-  const [webhookUrl, setWebhookUrl] = useState(`https://gateway.${domain || 'sms.customlinux.org'}/api/webhooks/inbound-sms`);
+  const [webhookUrl, setWebhookUrl] = useState('http://127.0.0.1:3000/api/webhooks/inbound-sms');
   const [dkimBits, setDkimBits] = useState<'2048' | '4096'>('2048');
   const [mtaStsMode, setMtaStsMode] = useState<'enforce' | 'testing'>('enforce');
   const [enablePostscreen, setEnablePostscreen] = useState(true);
   const [enableFail2Ban, setEnableFail2Ban] = useState(true);
   const [rateLimit, setRateLimit] = useState(60);
+  const [cfApiToken, setCfApiToken] = useState('');
 
   const safeDomain = domain.trim() || 'sms.customlinux.org';
   const safeIp = publicIp.trim() || '198.51.100.45';
@@ -91,9 +96,20 @@ append_dot_mydomain = no
 message_size_limit = 2097152
 recipient_delimiter = +
 
-# 1,000 Working Virtual Numbers Mapping
-virtual_alias_domains = ${safeDomain}
+# 1,000 Working Virtual Numbers (Dual Delivery: Dovecot Maildir + SMS Pipe)
+virtual_mailbox_domains = ${safeDomain}
+virtual_mailbox_base = /var/mail/vhosts
+virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_minimum_uid = 5000
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+virtual_transport = lmtp:unix:private/dovecot-lmtp
 virtual_alias_maps = hash:/etc/postfix/virtual
+transport_maps = hash:/etc/postfix/transport
+apex-carrier-pipe_destination_recipient_limit = 1
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = yes
 
 # Strict Inbound & Outbound TLS (TLS 1.3 / 1.2 Only, Perfect Forward Secrecy)
 smtpd_tls_cert_file = /etc/letsencrypt/live/mx1.${safeDomain}/fullchain.pem
@@ -327,6 +343,60 @@ exten => _[a-zA-Z0-9._-].,1,NoOp(Federated SIP call to \${EXTEN}@\${SIPDOMAIN})
 
 # Download full 1,000 self-hosted endpoints: /api/export/asterisk-pjsip?domain=${safeDomain}&ip=${safeIp}`;
 
+  const dovecotImapContent = `# /etc/dovecot/conf.d/99-linux-carrier.conf — 1,000 Real Independent IMAP/LMTP Mailboxes
+protocols = imap lmtp
+mail_location = maildir:/var/mail/vhosts/%d/%n
+auth_mechanisms = plain login
+disable_plaintext_auth = yes
+ssl = required
+ssl_cert = </etc/letsencrypt/live/mx1.${safeDomain}/fullchain.pem
+ssl_key = </etc/letsencrypt/live/mx1.${safeDomain}/privkey.pem
+ssl_min_protocol = TLSv1.2
+
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/users
+}
+userdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+}
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0666
+    user = postfix
+    group = postfix
+  }
+}
+
+# Export 1,000 unified Dovecot mailbox entries:
+# curl -fsSL "http://127.0.0.1:3000/api/export/dovecot-users?domain=${safeDomain}" > /etc/dovecot/users`;
+
+  const coturnTurnContent = `# /etc/turnserver.conf — Cross-Network WebRTC Audio Relay (Ports 3478 / 5349)
+listening-port=3478
+tls-listening-port=5349
+listening-ip=0.0.0.0
+external-ip=${safeIp}
+realm=${safeDomain}
+use-auth-secret
+static-auth-secret=<RUN_openssl_rand_-hex_24>
+cert=/etc/letsencrypt/live/mx1.${safeDomain}/fullchain.pem
+pkey=/etc/letsencrypt/live/mx1.${safeDomain}/privkey.pem
+min-port=49152
+max-port=65535
+no-multicast-peers
+no-loopback-peers
+
+# Launch server.ts with matching TURN env vars so /api/rtc/ice-config issues time-limited HMAC credentials:
+# TURN_URL="turn:${safeIp}:3478" TURN_SECRET="<SAME_SECRET>" npm start`;
+
   const kernelSystemdContent = `# 1. /etc/sysctl.d/99-linux-carrier-1000.conf — 1,000 Concurrent Calling + SMS Kernel Tuning
 fs.file-max = 2097152
 net.core.somaxconn = 4096
@@ -442,6 +512,8 @@ sudo fail2ban-client status asterisk`;
   const tabs: { id: ConfigTab; label: string; content: string }[] = [
     { id: 'main_cf', label: 'main.cf (TLS & Anti-Relay)', content: mainCfContent },
     { id: 'master_cf', label: 'master.cf (Postscreen & 587/465)', content: masterCfContent },
+    { id: 'dovecot_imap', label: 'Dovecot IMAPS (993)', content: dovecotImapContent },
+    { id: 'coturn_turn', label: 'Coturn TURN (3478)', content: coturnTurnContent },
     { id: 'asterisk_pjsip', label: 'Asterisk PJSIP (1K Voice)', content: asteriskPjsipContent },
     { id: 'dns_dkim', label: 'DNS Zone + DANE + DKIM', content: dnsZoneContent },
     { id: 'mta_sts', label: 'Certbot ECDSA + MTA-STS', content: mtaStsNginxContent },
@@ -454,6 +526,11 @@ sudo fail2ban-client status asterisk`;
   const activeSnippet = tabs.find((t) => t.id === activeConfigTab)?.content || '';
 
   const downloadUrl = `/api/export/install-script?domain=${encodeURIComponent(safeDomain)}&ip=${encodeURIComponent(safeIp)}&dkimBits=${dkimBits}&mtaStsMode=${mtaStsMode}&rateLimit=${rateLimit}&postscreen=${enablePostscreen}&fail2ban=${enableFail2Ban}&webhookUrl=${encodeURIComponent(webhookUrl)}&networkMode=${networkMode}`;
+  const origin = typeof window !== 'undefined' ? window.location.origin : `https://gateway.${safeDomain}`;
+  const cleanCfToken = cfApiToken.trim();
+  const oneLineCommand = cleanCfToken
+    ? `curl -fsSL "${origin}${downloadUrl}" -o install-carrier-1000.sh && sudo CF_API_TOKEN="${cleanCfToken}" bash install-carrier-1000.sh`
+    : `curl -fsSL "${origin}${downloadUrl}" -o install-carrier-1000.sh && sudo bash install-carrier-1000.sh`;
 
   return (
     <div className="space-y-6">
@@ -463,34 +540,78 @@ sudo fail2ban-client status asterisk`;
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-xs text-cyan-400 font-medium">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Public-Network Enterprise Hardened Mail Stack</span>
+              <span>Self-Contained All-In-One Installer (No git clone needed)</span>
             </div>
             <h2 className="text-xl font-bold text-slate-50">
-              Secure Public SMTP Configuration & Deployment
+              Secure Public SMTP & Voice Deployment
             </h2>
             <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
-              Exposes your 1,000-number Linux gateway on the public internet with globally routable IPv4 binding (or WireGuard + HAProxy public VPS edge), Postscreen DNSBL screening, TLS 1.3 ECDSA P-384, DANE TLSA pinning, OpenDKIM, MTA-STS, Fail2Ban, and HMAC-signed public HTTPS webhooks.
+              This single command embeds the entire app and provisions everything on any fresh Debian or Ubuntu host: kernel tuning, 1,000 unified accounts (Postfix dual-delivery, Dovecot IMAPS 993, Asterisk PJSIP, MCP tokens), OpenDKIM, Coturn TURN, ECDSA TLS + auto-upgrade timer, Nginx HTTPS, Fail2Ban, UFW, daily backups, <span className="font-mono text-slate-300">linux-carrier</span> CLI, optional Cloudflare DNS sync, and live verification.
             </p>
           </div>
 
-          <a
-            href={downloadUrl}
-            className={`inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
-              ipIsPrivate
-                ? 'bg-slate-800 text-slate-400 pointer-events-none'
-                : 'text-slate-950 bg-cyan-400 hover:bg-cyan-300'
-            }`}
-          >
-            <Download className="w-4 h-4" />
-            Download Public Installer (.sh)
-          </a>
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => copySnippet(oneLineCommand, 'one_line_cli')}
+              disabled={ipIsPrivate}
+              className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                ipIsPrivate
+                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                  : 'text-slate-950 bg-cyan-400 hover:bg-cyan-300'
+              }`}
+            >
+              {copiedKey === 'one_line_cli' ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  Copied One-Line Command
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4" />
+                  Copy One-Line Command
+                </>
+              )}
+            </button>
+            <a
+              href={downloadUrl}
+              className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                ipIsPrivate
+                  ? 'bg-slate-950 border-slate-800 text-slate-500 pointer-events-none'
+                  : 'bg-slate-950 border-slate-700 text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              <Download className="w-4 h-4" />
+              Download .sh
+            </a>
+          </div>
+        </div>
+
+        {/* One-Command CLI Panel */}
+        <div className="space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+            <span className="font-medium text-slate-200">
+              Run directly on any fresh Debian/Ubuntu machine (app source is bundled inside the script)
+            </span>
+            <span className="text-slate-500">
+              App Bundle · 1,000 Maildirs & PJSIP · Auto-TLS Timer · Cloudflare DNS Sync · Daily Backup · E2E Probe
+            </span>
+          </div>
+          <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg overflow-x-auto">
+            <code className="text-xs font-mono text-cyan-300 whitespace-nowrap select-all">
+              {oneLineCommand}
+            </code>
+          </div>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            Saves all 1,000 credentials to <span className="font-mono text-slate-300">/etc/linux-carrier-1000/credentials.json</span> (chmod 600), installs the <span className="font-mono text-slate-300">linux-carrier</span> CLI (<span className="font-mono text-slate-300">status</span> / <span className="font-mono text-slate-300">doctor</span> / <span className="font-mono text-slate-300">dns</span> / <span className="font-mono text-slate-300">creds 1</span>), schedules automatic Let&apos;s Encrypt ECDSA P-384 upgrade once DNS propagates, tests SMTP :25 + Dovecot IMAPS :993 + outbound Port 25, and starts <span className="font-mono text-slate-300">linux-carrier-1000.service</span>.
+          </p>
         </div>
 
         {ipIsPrivate && (
           <div className="p-3.5 bg-rose-950/40 border border-rose-700/50 rounded-lg flex items-start gap-2.5 text-xs text-rose-200">
             <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
             <div>
-              <span className="font-semibold">Private / CGNAT IP Detected ({safeIp}):</span> Public internet mail hosting requires a globally routable public IPv4. Enter your public VPS or cloud host IPv4 above (the installer explicitly rejects RFC 1918 and CGNAT subnets).
+              <span className="font-semibold">Private / CGNAT IP Detected ({safeIp}):</span> Public internet mail hosting requires a globally routable public IPv4. Enter your public VPS or cloud host IPv4 below (the installer explicitly rejects RFC 1918 and CGNAT subnets).
             </div>
           </div>
         )}
@@ -508,11 +629,21 @@ sudo fail2ban-client status asterisk`;
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5">Public Routable IPv4</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-medium text-slate-300">Public Routable IPv4 (or auto)</label>
+              <button
+                type="button"
+                onClick={() => onPublicIpChange('auto')}
+                className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors whitespace-nowrap"
+              >
+                Use Auto-Detect
+              </button>
+            </div>
             <input
               type="text"
               value={publicIp}
               onChange={(e) => onPublicIpChange(e.target.value)}
+              placeholder="auto or 203.0.113.10"
               className={`w-full px-3 py-2 text-sm font-mono bg-slate-950 border rounded-lg text-slate-100 focus:outline-none ${
                 ipIsPrivate ? 'border-rose-600 focus:border-rose-500' : 'border-slate-800 focus:border-cyan-500'
               }`}
@@ -520,12 +651,12 @@ sudo fail2ban-client status asterisk`;
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5">Public HTTPS Webhook Endpoint</label>
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">Cloudflare API Token (Optional Auto-DNS)</label>
             <input
-              type="url"
-              value={webhookUrl}
-              onChange={(e) => setWebhookUrl(e.target.value)}
-              placeholder={`https://gateway.${safeDomain}/api/webhooks/sms`}
+              type="password"
+              value={cfApiToken}
+              onChange={(e) => setCfApiToken(e.target.value)}
+              placeholder="Optional — auto-publishes all 10 DNS records"
               className="w-full px-3 py-2 text-sm font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
             />
           </div>

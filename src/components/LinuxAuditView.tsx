@@ -9,15 +9,18 @@ import {
   Terminal,
   PhoneCall,
   Mail,
-  Radio
+  Radio,
+  ShieldCheck
 } from 'lucide-react';
-import { SystemCapabilities, BenchmarkResult } from '../types';
+import { SystemCapabilities, BenchmarkResult, E2eVerificationReport } from '../types';
 
 export const LinuxAuditView: React.FC = () => {
   const [caps, setCaps] = useState<SystemCapabilities | null>(null);
   const [loadingCaps, setLoadingCaps] = useState(true);
   const [benchmark, setBenchmark] = useState<BenchmarkResult | null>(null);
   const [runningBench, setRunningBench] = useState(false);
+  const [e2eReport, setE2eReport] = useState<E2eVerificationReport | null>(null);
+  const [runningE2e, setRunningE2e] = useState(false);
 
   const loadCapabilities = useCallback(async () => {
     setLoadingCaps(true);
@@ -47,6 +50,18 @@ export const LinuxAuditView: React.FC = () => {
     }
   };
 
+  const runE2eSuite = async () => {
+    setRunningE2e(true);
+    try {
+      const res = await fetch('/api/system/verify-e2e', { method: 'POST' });
+      if (res.ok) {
+        setE2eReport(await res.json());
+      }
+    } finally {
+      setRunningE2e(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header & Live Benchmark Trigger */}
@@ -64,7 +79,7 @@ export const LinuxAuditView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-3 shrink-0">
           <button
             onClick={loadCapabilities}
             disabled={loadingCaps}
@@ -72,6 +87,15 @@ export const LinuxAuditView: React.FC = () => {
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingCaps ? 'animate-spin' : ''}`} />
             Re-Scan Host
+          </button>
+
+          <button
+            onClick={runE2eSuite}
+            disabled={runningE2e}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-700/60 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            {runningE2e ? 'Running E2E Checks...' : 'Run Production E2E Suite'}
           </button>
 
           <button
@@ -84,6 +108,46 @@ export const LinuxAuditView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Live Production E2E Verification Results */}
+      {e2eReport && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-slate-100">
+              Production Deployment E2E Verification Report
+            </h3>
+            <div className="flex items-center gap-3 text-xs font-mono">
+              <span className="text-emerald-400">{e2eReport.passedCount} Passed</span>
+              <span className="text-amber-400">{e2eReport.warningCount} Warnings</span>
+              <span className="text-rose-400">{e2eReport.failedCount} Failed</span>
+            </div>
+          </div>
+          <div className="divide-y divide-slate-800/70">
+            {e2eReport.checks.map((chk) => (
+              <div key={chk.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-slate-100">{chk.name}</div>
+                  <div className="text-slate-400">{chk.detail}</div>
+                </div>
+                <div className="flex items-center gap-3 font-mono shrink-0">
+                  <span className="text-slate-500">{chk.durationMs} ms</span>
+                  <span
+                    className={`capitalize font-semibold ${
+                      chk.status === 'passed'
+                        ? 'text-emerald-400'
+                        : chk.status === 'warning'
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    {chk.status}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Embedded Self-Hosted Services Live Status */}
       {caps && caps.embeddedServices && (
@@ -130,12 +194,12 @@ export const LinuxAuditView: React.FC = () => {
             </div>
 
             <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg">
-              <div className="text-slate-400">External Carrier Dependency</div>
-              <div className="font-mono font-semibold text-emerald-400 mt-1">
-                None (100% Self-Hosted)
+              <div className="text-slate-400">Cross-Network &amp; Mailboxes</div>
+              <div className="font-mono font-semibold text-slate-100 mt-1">
+                TURN: {caps.embeddedServices.turnConfigured ? 'Active' : 'STUN Only'} · IMAPS: {caps.embeddedServices.imapListening ? '993 Up' : 'Offline'}
               </div>
               <div className="text-[11px] text-slate-400 mt-0.5">
-                Direct Linux sockets &amp; federation
+                Coturn + Dovecot readiness
               </div>
             </div>
           </div>

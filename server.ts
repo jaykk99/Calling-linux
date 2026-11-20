@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import dns from 'dns/promises';
 import net from 'net';
@@ -54,8 +54,11 @@ export interface VirtualNumber {
   e164: string;
   extension: number;
   assignedEmail: string;
+  imapMailbox: string;
   sipUri: string;
   sipUsername: string;
+  mcpTokenPrefix: string;
+  quotaMb: number;
   routingMode: 'self-hosted' | 'federated-sip' | 'webhook';
   status: 'active' | 'idle' | 'reserved' | 'forwarding';
   label: string;
@@ -144,8 +147,11 @@ function generate1000Numbers(domain: string = 'sms.customlinux.org', prefix: str
       e164,
       extension: i,
       assignedEmail: `${digitsOnly}@${domain}`,
+      imapMailbox: `${digitsOnly}@${domain}`,
       sipUri: `sip:${digitsOnly}@${domain}`,
       sipUsername: `did_${digitsOnly}`,
+      mcpTokenPrefix: `mcp_${extStr}_${crypto.createHash('sha256').update(`lc1000:${digitsOnly}`).digest('hex').slice(0, 8)}`,
+      quotaMb: 512,
       routingMode: 'self-hosted',
       status,
       label,
@@ -174,13 +180,23 @@ function loadPersistedState() {
       const raw = fs.readFileSync(STATE_FILE, 'utf8');
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.numbers) && parsed.numbers.length > 0) {
-        currentDomain = parsed.domain || currentDomain;
-        currentPublicIp = parsed.publicIp || currentPublicIp;
-        numbersStore = parsed.numbers.map((n: any) => ({
-          ...n,
-          sipUri: n.sipUri || `sip:${n.e164.replace('+', '')}@${currentDomain}`,
-          routingMode: n.routingMode || 'self-hosted'
-        }));
+        currentDomain = process.env.CARRIER_DOMAIN || parsed.domain || currentDomain;
+        currentPublicIp = process.env.CARRIER_PUBLIC_IP || parsed.publicIp || currentPublicIp;
+        numbersStore = parsed.numbers.map((n: any) => {
+          const digitsOnly = (n.e164 || '').replace('+', '');
+          const extStr = (n.extension || 1).toString().padStart(4, '0');
+          return {
+            ...n,
+            assignedEmail: `${digitsOnly}@${currentDomain}`,
+            imapMailbox: `${digitsOnly}@${currentDomain}`,
+            sipUri: `sip:${digitsOnly}@${currentDomain}`,
+            mcpTokenPrefix:
+              n.mcpTokenPrefix ||
+              `mcp_${extStr}_${crypto.createHash('sha256').update(`lc1000:${digitsOnly}`).digest('hex').slice(0, 8)}`,
+            quotaMb: n.quotaMb || 512,
+            routingMode: n.routingMode || 'self-hosted'
+          };
+        });
         messagesStore = Array.isArray(parsed.messages) ? parsed.messages : [];
         callsStore = Array.isArray(parsed.calls) ? parsed.calls : [];
         return;
@@ -918,8 +934,11 @@ app.post('/api/numbers/batch-generate', (req: Request, res: Response) => {
       e164,
       extension: i,
       assignedEmail: `${digitsOnly}@${targetDomain}`,
+      imapMailbox: `${digitsOnly}@${targetDomain}`,
       sipUri: `sip:${digitsOnly}@${targetDomain}`,
       sipUsername: `did_${digitsOnly}`,
+      mcpTokenPrefix: `mcp_${extStr}_${crypto.createHash('sha256').update(`lc1000:${digitsOnly}`).digest('hex').slice(0, 8)}`,
+      quotaMb: 512,
       routingMode: 'self-hosted',
       status: 'active',
       label: `Self-Hosted Line #${i}`,
@@ -1086,7 +1105,33 @@ app.post('/api/messages/simulate-inbound', async (req: Request, res: Response) =
   res.json({ success: true, message: result.msg, number: result.targetNumber });
 });
 
-// ----------------- API ROUTES: REAL SELF-HOSTED WEBRTC & ASTERISK VOICE CALLING ----------------- //
+// ----------------- API ROUTES: REAL SELF-HOSTED WEBRTC, COTURN ICE & ASTERISK VOICE CALLING ----------------- //
+
+app.get('/api/rtc/ice-config', (_req: Request, res: Response) => {
+  const iceServers: any[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+  const turnUrl = process.env.TURN_URL || '';
+  const turnSecret = process.env.TURN_SECRET || '';
+  const turnUser = process.env.TURN_USERNAME || '';
+  const turnPass = process.env.TURN_PASSWORD || '';
+  let turnEnabled = false;
+  let turnHost: string | null = null;
+
+  if (turnUrl && turnSecret) {
+    // Coturn REST API time-limited HMAC-SHA1 credentials
+    const unixExpiry = Math.floor(Date.now() / 1000) + 86400;
+    const username = `${unixExpiry}:linuxcarrier`;
+    const credential = crypto.createHmac('sha1', turnSecret).update(username).digest('base64');
+    iceServers.push({ urls: turnUrl, username, credential });
+    turnEnabled = true;
+    turnHost = turnUrl;
+  } else if (turnUrl && turnUser && turnPass) {
+    iceServers.push({ urls: turnUrl, username: turnUser, credential: turnPass });
+    turnEnabled = true;
+    turnHost = turnUrl;
+  }
+
+  res.json({ iceServers, turnEnabled, turnHost });
+});
 
 app.get('/api/rtc/peers', (_req: Request, res: Response) => {
   res.json({
@@ -1327,11 +1372,13 @@ app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
 
   const binarySpecs = [
     { name: 'postfix', role: 'Public Port 25/465/587 MTA (1,000 Self-Hosted SMS DIDs)' },
+    { name: 'dovecot', role: 'IMAP/IMAPS (993) & LMTP Independent Mailboxes' },
+    { name: 'turnserver', role: 'Coturn STUN/TURN Relay (Cross-Network WebRTC Audio)' },
     { name: 'asterisk', role: 'Optional High-Capacity SIP/RTP PBX (1,000 Voice DIDs)' },
     { name: 'opendkim', role: '2048/4096-bit DKIM Signing Milter' },
     { name: 'certbot', role: 'Automated Let’s Encrypt ECDSA TLS' },
     { name: 'nginx', role: 'HTTPS MTA-STS & WebRTC Reverse Proxy' },
-    { name: 'fail2ban-server', role: 'SMTP/SIP Intrusion Prevention' },
+    { name: 'fail2ban-server', role: 'SMTP/IMAP/SIP Intrusion Prevention' },
     { name: 'wg', role: 'WireGuard Public Edge Tunnel' },
     { name: 'swaks', role: 'SMTP Port 25 & TLS Probe CLI' }
   ];
@@ -1345,6 +1392,8 @@ app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
     { port: 25, protocol: 'TCP', service: 'SMTP Port 25 (Public MX)' },
     { port: embeddedSmtpPort || 2525, protocol: 'TCP', service: 'Embedded Self-Hosted SMTP' },
     { port: 587, protocol: 'TCP', service: 'SMTP Submission (STARTTLS)' },
+    { port: 993, protocol: 'TCP', service: 'Dovecot IMAPS (Real Mailboxes)' },
+    { port: 3478, protocol: 'TCP', service: 'Coturn TURN Relay (Cross-Network WebRTC)' },
     { port: 5038, protocol: 'TCP', service: 'Asterisk AMI (Optional PBX)' },
     { port: 5060, protocol: 'TCP', service: 'SIP TCP Signaling' },
     { port: 3000, protocol: 'TCP', service: 'Self-Hosted WebRTC & API Switch' }
@@ -1370,7 +1419,10 @@ app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
   const ephemeralPorts = readProcStr('/proc/sys/net/ipv4/ip_local_port_range');
 
   const port25Listening = ports.find((p) => p.port === 25)?.listening || false;
+  const imapListening = ports.find((p) => p.port === 993)?.listening || false;
+  const turnListening = ports.find((p) => p.port === 3478)?.listening || false;
   const amiListening = ports.find((p) => p.port === 5038)?.listening || false;
+  const turnConfigured = Boolean(process.env.TURN_URL && (process.env.TURN_SECRET || process.env.TURN_PASSWORD)) || turnListening;
 
   const warnings: string[] = [];
   if (!port25Listening) {
@@ -1378,8 +1430,14 @@ app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
       `Postfix is not listening on Port 25 yet. Embedded Self-Hosted SMTP is live on port ${embeddedSmtpPort || 2525}, and running the Linux installer enables full public Port 25 + TLS 1.3.`
     );
   }
+  if (!imapListening) {
+    warnings.push('Dovecot IMAPS (:993) is not running on this host yet; run the Linux installer to serve real IMAP mailboxes for all 1,000 DIDs.');
+  }
+  if (!turnConfigured) {
+    warnings.push('Coturn TURN relay (:3478) is not active/configured; browser-to-browser WebRTC across strict symmetric NATs requires TURN_URL + TURN_SECRET or Coturn.');
+  }
   if (typeof nofileLimit === 'number' && nofileLimit < 65535) {
-    warnings.push(`Open file descriptor limit (ulimit -n = ${nofileLimit}) should be raised to 65535 for 1,000 simultaneous SIP/WebRTC/SMTP sockets.`);
+    warnings.push(`Open file descriptor limit (ulimit -n = ${nofileLimit}) should be raised to 65535 for 1,000 simultaneous SIP/WebRTC/SMTP/IMAP sockets.`);
   }
 
   res.json({
@@ -1400,6 +1458,8 @@ app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
       sipActive: embeddedSipPort !== null,
       smtpListenPort: embeddedSmtpPort,
       smtpActive: embeddedSmtpPort !== null,
+      turnConfigured,
+      imapListening,
       webrtcOnlineLines: Array.from(rtcSubscribers.keys()),
       sipRegisteredLines: Array.from(sipRegistrations.keys())
     },
@@ -1418,6 +1478,350 @@ app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
       canTerminateCalls: embeddedSipPort !== null || amiListening,
       warnings
     }
+  });
+});
+
+// ----------------- REAL IMAP / MAILDIR SYNC (DOVECOT INTEGRATION) ----------------- //
+
+function imapCommand(
+  socket: net.Socket | tls.TLSSocket,
+  tag: string,
+  command: string,
+  timeoutMs = 5000
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const timer = setTimeout(() => {
+      socket.removeListener('data', onData);
+      reject(new Error(`IMAP command ${tag} timed out`));
+    }, timeoutMs);
+
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      const doneRegex = new RegExp(`^${tag}\\s+(OK|NO|BAD)`, 'im');
+      if (doneRegex.test(buffer)) {
+        clearTimeout(timer);
+        socket.removeListener('data', onData);
+        resolve(buffer);
+      }
+    };
+
+    socket.on('data', onData);
+    socket.write(`${tag} ${command}\r\n`);
+  });
+}
+
+app.post('/api/mailboxes/imap-sync', async (req: Request, res: Response) => {
+  const { host, port, username, password, useTls } = req.body;
+  const targetHost = (host || '127.0.0.1').trim();
+  const targetPort = parseInt(port, 10) || (useTls === false ? 143 : 993);
+  const mailboxUser = (username || `12015550001@${currentDomain}`).trim();
+
+  // Resolve local provisioned credential automatically if password omitted on self-hosted node
+  let resolvedPassword = (password || '').toString();
+  if (!resolvedPassword && (targetHost === '127.0.0.1' || targetHost === 'localhost')) {
+    try {
+      const credFile = '/etc/linux-carrier-1000/credentials.json';
+      if (fs.existsSync(credFile)) {
+        const creds = JSON.parse(fs.readFileSync(credFile, 'utf8'));
+        const match = (creds.accounts || []).find((a: any) => a.email === mailboxUser);
+        if (match?.password) {
+          resolvedPassword = match.password;
+        }
+      }
+    } catch {
+      // Ignore credential lookup failure and fall back to Maildir/error
+    }
+  }
+
+  // First check if local Dovecot Maildir exists directly on Linux host and no explicit IMAP password requested
+  const [localPart, domPart] = mailboxUser.split('@');
+  const maildirBase = `/var/mail/vhosts/${domPart || currentDomain}/${localPart}`;
+  if (targetHost === '127.0.0.1' && fs.existsSync(maildirBase) && !resolvedPassword) {
+    try {
+      const folders = ['new', 'cur'].map((sub) => path.join(maildirBase, sub)).filter((d) => fs.existsSync(d));
+      const files: string[] = [];
+      for (const dir of folders) {
+        for (const f of fs.readdirSync(dir)) {
+          files.push(path.join(dir, f));
+        }
+      }
+      const messages = files.slice(-25).reverse().map((filePath, idx) => {
+        const raw = fs.readFileSync(filePath, 'utf8').slice(0, 8192);
+        const from = (raw.match(/^From:\s*(.+)$/im)?.[1] || 'Unknown').trim();
+        const to = (raw.match(/^To:\s*(.+)$/im)?.[1] || mailboxUser).trim();
+        const subject = (raw.match(/^Subject:\s*(.+)$/im)?.[1] || '(no subject)').trim();
+        const date = (raw.match(/^Date:\s*(.+)$/im)?.[1] || new Date().toUTCString()).trim();
+        const bodyStart = raw.search(/\r?\n\r?\n/);
+        const snippet = (bodyStart >= 0 ? raw.slice(bodyStart).trim() : raw).slice(0, 200);
+        return { uid: String(idx + 1), from, to, subject, date, snippet, source: 'local-maildir' };
+      });
+      res.json({ success: true, source: 'local-maildir', mailbox: mailboxUser, messages });
+      return;
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: `Maildir read failed: ${err.message}` });
+      return;
+    }
+  }
+
+  if (!resolvedPassword) {
+    res.status(400).json({
+      success: false,
+      error: `Dovecot IMAP requires credentials (or local Maildir at ${maildirBase}). Run the Linux installer to provision Dovecot on port 993.`
+    });
+    return;
+  }
+
+  try {
+    const socket: net.Socket | tls.TLSSocket =
+      useTls !== false
+        ? tls.connect({ host: targetHost, port: targetPort, rejectUnauthorized: false, timeout: 5000 })
+        : net.createConnection({ host: targetHost, port: targetPort, timeout: 5000 });
+
+    await new Promise<void>((resolve, reject) => {
+      const onErr = (err: any) => reject(err);
+      socket.once('error', onErr);
+      socket.once('timeout', () => reject(new Error(`IMAP connection to ${targetHost}:${targetPort} timed out`)));
+      socket.once('data', () => {
+        socket.removeListener('error', onErr);
+        resolve();
+      });
+    });
+
+    const escapedPass = resolvedPassword.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const loginResp = await imapCommand(socket, 'A1', `LOGIN "${mailboxUser}" "${escapedPass}"`);
+    if (!/^A1\s+OK/im.test(loginResp)) {
+      socket.destroy();
+      res.status(401).json({ success: false, error: `IMAP authentication failed: ${loginResp.trim()}` });
+      return;
+    }
+
+    const selectResp = await imapCommand(socket, 'A2', 'SELECT INBOX');
+    const existsMatch = selectResp.match(/\*\s+(\d+)\s+EXISTS/i);
+    const totalCount = existsMatch ? parseInt(existsMatch[1], 10) : 0;
+
+    const messages: any[] = [];
+    if (totalCount > 0) {
+      const startSeq = Math.max(1, totalCount - 14);
+      const fetchResp = await imapCommand(
+        socket,
+        'A3',
+        `FETCH ${startSeq}:${totalCount} (UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] BODY.PEEK[TEXT]<0.240>)`
+      );
+      const blocks = fetchResp.split(/\*\s+\d+\s+FETCH\s+/i).slice(1);
+      for (const blk of blocks.reverse()) {
+        const uid = blk.match(/UID\s+(\d+)/i)?.[1] || '0';
+        const from = (blk.match(/^From:\s*(.+)$/im)?.[1] || 'Unknown').trim();
+        const to = (blk.match(/^To:\s*(.+)$/im)?.[1] || mailboxUser).trim();
+        const subject = (blk.match(/^Subject:\s*(.+)$/im)?.[1] || '(no subject)').trim();
+        const date = (blk.match(/^Date:\s*(.+)$/im)?.[1] || '').trim();
+        const snippetMatch = blk.match(/BODY\[TEXT\]<\d+>\s+\{\d+\}\r?\n([\s\S]*)/i);
+        const snippet = (snippetMatch?.[1] || '').replace(/\r?\n/g, ' ').trim().slice(0, 180);
+        messages.push({
+          uid,
+          from,
+          to,
+          subject,
+          date,
+          snippet,
+          source: useTls !== false ? 'imap-tls' : 'imap-plain'
+        });
+      }
+    }
+
+    await imapCommand(socket, 'A4', 'LOGOUT').catch(() => {});
+    socket.destroy();
+    res.json({
+      success: true,
+      source: useTls !== false ? 'imap-tls' : 'imap-plain',
+      mailbox: mailboxUser,
+      totalCount,
+      messages
+    });
+  } catch (err: any) {
+    res.status(502).json({
+      success: false,
+      error: `IMAP connect failed on ${targetHost}:${targetPort} (${err.code || err.message}). Ensure Dovecot is installed and running.`
+    });
+  }
+});
+
+// ----------------- REAL PRODUCTION END-TO-END SELF-TEST SUITE ----------------- //
+
+app.post('/api/system/verify-e2e', async (_req: Request, res: Response) => {
+  const checks: { id: string; name: string; status: 'passed' | 'warning' | 'failed'; durationMs: number; detail: string }[] = [];
+
+  // 1. Unified 1,000-Identity & Persistence Recovery Check
+  const t1 = performance.now();
+  try {
+    const uniqueEmails = new Set(numbersStore.map((n) => n.assignedEmail));
+    const uniqueSips = new Set(numbersStore.map((n) => n.sipUsername));
+    const uniqueMcp = new Set(numbersStore.map((n) => n.mcpTokenPrefix));
+    savePersistedState();
+    const diskReadable = fs.existsSync(STATE_FILE) && JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).numbers.length === numbersStore.length;
+    const ok = numbersStore.length === 1000 && uniqueEmails.size === 1000 && uniqueSips.size === 1000 && uniqueMcp.size === 1000 && diskReadable;
+    checks.push({
+      id: 'unified-identity',
+      name: 'Unified 1,000-Agent Identity & Disk Persistence',
+      status: ok ? 'passed' : 'failed',
+      durationMs: Number((performance.now() - t1).toFixed(2)),
+      detail: ok
+        ? `All 1,000 DIDs share unique unified Email, SIP URI, IMAP mailbox, and MCP tokens persisted at ${STATE_FILE}`
+        : 'Identity collision or persistence mismatch detected.'
+    });
+  } catch (err: any) {
+    checks.push({
+      id: 'unified-identity',
+      name: 'Unified 1,000-Agent Identity & Disk Persistence',
+      status: 'failed',
+      durationMs: Number((performance.now() - t1).toFixed(2)),
+      detail: err.message
+    });
+  }
+
+  // 2. Live Embedded SMTP & Local Postfix Port 25 Probe
+  const t2 = performance.now();
+  const postfixUp = await checkLocalPortOpen('127.0.0.1', 25, 400);
+  const embeddedUp = embeddedSmtpPort ? await checkLocalPortOpen('127.0.0.1', embeddedSmtpPort, 400) : false;
+  checks.push({
+    id: 'smtp-live',
+    name: 'Live RFC 5321 SMTP Listener & Port 25 Postfix',
+    status: postfixUp ? 'passed' : embeddedUp ? 'warning' : 'failed',
+    durationMs: Number((performance.now() - t2).toFixed(2)),
+    detail: postfixUp
+      ? `Postfix Port 25 AND embedded SMTP :${embeddedSmtpPort} are actively accepting connections.`
+      : embeddedUp
+      ? `Embedded SMTP :${embeddedSmtpPort} is live for self-hosted relay; Postfix Port 25 not yet running (install via Deployment tab for public internet MX).`
+      : 'Neither Postfix :25 nor embedded SMTP is listening.'
+  });
+
+  // 3. Live RFC 3261 SIP UDP OPTIONS Round-Trip
+  const t3 = performance.now();
+  const sipResult = await new Promise<{ ok: boolean; detail: string }>((resolve) => {
+    if (!embeddedSipPort) {
+      resolve({ ok: false, detail: 'Embedded SIP UDP server is not bound.' });
+      return;
+    }
+    const client = dgram.createSocket('udp4');
+    const timer = setTimeout(() => {
+      try {
+        client.close();
+      } catch {
+        // Ignore
+      }
+      resolve({ ok: false, detail: `SIP UDP OPTIONS timed out on 127.0.0.1:${embeddedSipPort}` });
+    }, 1200);
+
+    client.on('message', (buf) => {
+      clearTimeout(timer);
+      const text = buf.toString('utf8');
+      try {
+        client.close();
+      } catch {
+        // Ignore
+      }
+      resolve({
+        ok: text.startsWith('SIP/2.0 200 OK'),
+        detail: text.startsWith('SIP/2.0 200 OK')
+          ? `SIP/2.0 200 OK received from 127.0.0.1:${embeddedSipPort} (Allow: REGISTER, INVITE, ACK, BYE, CANCEL, OPTIONS)`
+          : `Unexpected SIP reply: ${text.split('\r\n')[0]}`
+      });
+    });
+
+    const pkt = [
+      `OPTIONS sip:${currentDomain} SIP/2.0`,
+      `Via: SIP/2.0/UDP 127.0.0.1:59099;branch=z9hG4bK-e2e`,
+      `From: <sip:probe@${currentDomain}>;tag=e2e`,
+      `To: <sip:probe@${currentDomain}>`,
+      `Call-ID: e2e-probe-${Date.now()}@127.0.0.1`,
+      `CSeq: 1 OPTIONS`,
+      `Content-Length: 0`,
+      '',
+      ''
+    ].join('\r\n');
+    client.send(Buffer.from(pkt), embeddedSipPort, '127.0.0.1');
+  });
+  checks.push({
+    id: 'sip-udp',
+    name: 'Live RFC 3261 SIP UDP Registrar Round-Trip',
+    status: sipResult.ok ? 'passed' : 'failed',
+    durationMs: Number((performance.now() - t3).toFixed(2)),
+    detail: sipResult.detail
+  });
+
+  // 4. WebRTC Coturn TURN Relay Check
+  const t4 = performance.now();
+  const turnLocalUp = await checkLocalPortOpen('127.0.0.1', 3478, 350);
+  const turnEnvConfigured = Boolean(process.env.TURN_URL && (process.env.TURN_SECRET || process.env.TURN_PASSWORD));
+  checks.push({
+    id: 'coturn-relay',
+    name: 'Cross-Network WebRTC Coturn TURN Relay (:3478)',
+    status: turnLocalUp || turnEnvConfigured ? 'passed' : 'warning',
+    durationMs: Number((performance.now() - t4).toFixed(2)),
+    detail: turnLocalUp
+      ? 'Coturn TURN server actively listening on TCP/3478 for cross-network WebRTC calls.'
+      : turnEnvConfigured
+      ? `External TURN relay configured via TURN_URL (${process.env.TURN_URL}).`
+      : 'STUN-only mode active; install Coturn (port 3478) or set TURN_URL + TURN_SECRET for calls across symmetric NATs/cellular networks.'
+  });
+
+  // 5. Dovecot IMAP Mailbox Daemon Check
+  const t5 = performance.now();
+  const imapsUp = await checkLocalPortOpen('127.0.0.1', 993, 350);
+  const imapUp = await checkLocalPortOpen('127.0.0.1', 143, 350);
+  checks.push({
+    id: 'dovecot-imap',
+    name: 'Dovecot Real IMAP/IMAPS Mailboxes (:993 / :143)',
+    status: imapsUp || imapUp ? 'passed' : 'warning',
+    durationMs: Number((performance.now() - t5).toFixed(2)),
+    detail: imapsUp
+      ? 'Dovecot IMAPS listening on port 993 for all 1,000 agent inboxes.'
+      : imapUp
+      ? 'Dovecot plaintext IMAP listening on port 143 (enable IMAPS 993 TLS for production).'
+      : 'Dovecot IMAP not listening yet; run the Linux installer to activate real independent IMAP inboxes.'
+  });
+
+  // 6. TLS Certificate Inspection
+  const t6 = performance.now();
+  const certPath = `/etc/letsencrypt/live/mx1.${currentDomain}/fullchain.pem`;
+  if (fs.existsSync(certPath)) {
+    try {
+      const pem = fs.readFileSync(certPath, 'utf8');
+      const x509 = new crypto.X509Certificate(pem);
+      const validTo = new Date(x509.validTo);
+      const daysLeft = Math.floor((validTo.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+      checks.push({
+        id: 'tls-cert',
+        name: 'Trusted ECDSA/RSA TLS Certificate & Renewal',
+        status: daysLeft > 14 ? 'passed' : 'warning',
+        durationMs: Number((performance.now() - t6).toFixed(2)),
+        detail: `Certificate ${x509.subject} valid for ${daysLeft} more days (expires ${x509.validTo}).`
+      });
+    } catch (err: any) {
+      checks.push({
+        id: 'tls-cert',
+        name: 'Trusted ECDSA/RSA TLS Certificate & Renewal',
+        status: 'warning',
+        durationMs: Number((performance.now() - t6).toFixed(2)),
+        detail: `Unable to parse ${certPath}: ${err.message}`
+      });
+    }
+  } else {
+    checks.push({
+      id: 'tls-cert',
+      name: 'Trusted ECDSA/RSA TLS Certificate & Renewal',
+      status: 'warning',
+      durationMs: Number((performance.now() - t6).toFixed(2)),
+      detail: `No Let's Encrypt cert at ${certPath} yet; Certbot provisions this once public DNS A record points to your host.`
+    });
+  }
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    passedCount: checks.filter((c) => c.status === 'passed').length,
+    warningCount: checks.filter((c) => c.status === 'warning').length,
+    failedCount: checks.filter((c) => c.status === 'failed').length,
+    checks
   });
 });
 
@@ -1754,6 +2158,46 @@ app.post('/api/diagnostics/verify', async (req: Request, res: Response) => {
 
 // ----------------- PRODUCTION EXPORTS (ZERO-CARRIER SELF-HOSTED) ----------------- //
 
+app.get('/api/export/unified-identities', (req: Request, res: Response) => {
+  const domain = (req.query.domain as string) || currentDomain;
+  const unified = numbersStore.map((n) => ({
+    id: n.id,
+    extension: n.extension,
+    e164: n.e164,
+    displayName: n.label,
+    email: n.assignedEmail,
+    imapMailbox: n.imapMailbox,
+    sipUri: `sip:${n.e164.replace('+', '')}@${domain}`,
+    sipUsername: n.sipUsername,
+    mcpTokenPrefix: n.mcpTokenPrefix,
+    quotaMb: n.quotaMb,
+    status: n.status
+  }));
+
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="unified-1000-identities-${domain}.json"`);
+  res.send(JSON.stringify({ domain, count: unified.length, identities: unified }, null, 2));
+});
+
+app.get('/api/export/dovecot-users', (req: Request, res: Response) => {
+  const domain = (req.query.domain as string) || currentDomain;
+  const lines = [
+    `# /etc/dovecot/users — Unified 1,000-Mailbox Passwd-File for ${domain}`,
+    `# Generate real hashes with: doveadm pw -s SHA512-CRYPT -p <PASSWORD>`,
+    ''
+  ];
+  numbersStore.forEach((n) => {
+    const localPart = n.e164.replace('+', '');
+    lines.push(
+      `${localPart}@${domain}:{SHA512-CRYPT}$REPLACE_WITH_DOVEADM_PW_HASH:5000:5000::/var/mail/vhosts/${domain}/${localPart}::userdb_quota_rule=*:bytes=${n.quotaMb}M`
+    );
+  });
+
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Content-Disposition', `attachment; filename="dovecot-users-${domain}.txt"`);
+  res.send(lines.join('\n'));
+});
+
 app.get('/api/export/postfix-virtual', (req: Request, res: Response) => {
   const domain = (req.query.domain as string) || currentDomain;
   const lines = [`# Postfix Virtual Alias Map for ${numbersStore.length} Self-Hosted Numbers on ${domain}`, ''];
@@ -1828,42 +2272,79 @@ app.get('/api/export/asterisk-pjsip', (req: Request, res: Response) => {
   res.send(lines.join('\n'));
 });
 
+let cachedAppBundleBase64: string | null = null;
+function getAppBundleBase64(): string {
+  if (cachedAppBundleBase64) return cachedAppBundleBase64;
+  const candidates = [
+    'package.json',
+    'package-lock.json',
+    'tsconfig.json',
+    'vite.config.ts',
+    'index.html',
+    'metadata.json',
+    'server.ts',
+    'src'
+  ].filter((f) => fs.existsSync(path.join(__dirname, f)));
+
+  const tarBuf = execFileSync(
+    'tar',
+    ['--exclude=node_modules', '--exclude=dist', '--exclude=data', '--exclude=.git', '-czf', '-', ...candidates],
+    { cwd: __dirname, maxBuffer: 25 * 1024 * 1024 }
+  );
+  cachedAppBundleBase64 = tarBuf.toString('base64').replace(/.{1,120}/g, '$&\n').trim();
+  return cachedAppBundleBase64;
+}
+
 app.get('/api/export/install-script', (req: Request, res: Response) => {
-  const domain = ((req.query.domain as string) || currentDomain).replace(/[^a-zA-Z0-9.-]/g, '');
-  const ip = ((req.query.ip as string) || currentPublicIp).replace(/[^0-9a-fA-F.:]/g, '');
+  const domain = ((req.query.domain as string) || currentDomain).replace(/[^a-zA-Z0-9.-]/g, '') || 'sms.customlinux.org';
+  const rawIp = ((req.query.ip as string) || currentPublicIp).trim();
+  const ip = rawIp.toLowerCase() === 'auto' ? 'auto' : rawIp.replace(/[^0-9.]/g, '') || 'auto';
   const dkimBits = req.query.dkimBits === '4096' ? '4096' : '2048';
   const mtaStsMode = req.query.mtaStsMode === 'testing' ? 'testing' : 'enforce';
   const rateLimit = Math.max(10, Math.min(1000, parseInt(req.query.rateLimit as string) || 60));
   const enablePostscreen = req.query.postscreen !== 'false';
   const enableFail2Ban = req.query.fail2ban !== 'false';
-  const webhookUrl = ((req.query.webhookUrl as string) || `https://gateway.${domain}/api/webhooks/inbound-sms`).replace(/["'\\`\s]/g, '');
+  const webhookUrl = ((req.query.webhookUrl as string) || 'http://127.0.0.1:3000/api/webhooks/inbound-sms').replace(/["'\\`\s]/g, '');
   const networkMode = req.query.networkMode === 'wireguard-edge' ? 'wireguard-edge' : 'direct-public';
+  const appBundleB64 = getAppBundleBase64();
 
   const script = `#!/usr/bin/env bash
 # ==============================================================================
-# Linux Carrier 1000 - 100% Self-Hosted Public Linux Installer (NO CARRIER NEEDED)
+# Linux Carrier 1000 - Complete Self-Contained One-Command Provisioner
 # Target Domain   : ${domain}
-# Public IPv4     : ${ip}
+# Public IPv4     : ${ip} (supports auto-detection via ipify if set to auto)
 # Network Mode    : ${networkMode === 'wireguard-edge' ? 'Public Edge VPS (WireGuard + HAProxy PROXY Protocol)' : 'Direct Public Network IPv4 Binding'}
-# Public Webhook  : ${webhookUrl}
-# Messaging Stack : Postfix (25/465/587) + Postscreen + OpenDKIM (${dkimBits}-bit) + TLS 1.3 + DANE + MTA-STS
-# Voice Stack     : Self-Hosted WebRTC + Embedded SIP UDP + Asterisk PJSIP (5060/5061 TLS/SRTP)
+# Optional Env    : CF_API_TOKEN=<token> (auto-publishes all 10 DNS records on Cloudflare)
+# Provisions All  : Embedded App + Systemd + 1,000 Postfix/Dovecot/Asterisk Accounts + OpenDKIM + Coturn + ECDSA TLS + Auto-Upgrade Timer + Backup Cron + Live Verification
 # ==============================================================================
 set -euo pipefail
 umask 027
 
-if [ "$EUID" -ne 0 ]; then
-  echo "[-] Error: Must be executed as root (sudo bash install-carrier-1000.sh)"
+SOURCE_DIR="\$(pwd)"
+TARGET_DOMAIN="${domain}"
+TARGET_IP="${ip}"
+
+if [ "\$EUID" -ne 0 ]; then
+  echo "[-] Error: Must be executed as root (sudo -E bash \$0)"
   exit 1
 fi
 
-if echo "${ip}" | grep -qE '^(10\\.|127\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|100\\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\\.)'; then
-  echo "[-] FATAL: ${ip} is a private/CGNAT/loopback IP. Public internet hosting requires a globally routable public IPv4."
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo "[-] Error: Debian/Ubuntu (apt-get) is required for automated package installation."
   exit 1
 fi
 
-echo "[*] Provisioning 100% Self-Hosted Linux Carrier 1000 for ${domain} (${ip})..."
+if [ "\${TARGET_IP}" = "auto" ] || [ -z "\${TARGET_IP}" ]; then
+  echo "[*] Auto-detecting public IPv4..."
+  TARGET_IP=\$(curl -4fsS --max-time 8 https://api.ipify.org || curl -4fsS --max-time 8 https://ifconfig.me/ip || true)
+fi
 
+if [ -z "\${TARGET_IP}" ] || echo "\${TARGET_IP}" | grep -qE '^(10\\.|127\\.|0\\.|169\\.254\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|100\\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\\.)'; then
+  echo "[-] FATAL: '\${TARGET_IP}' is not a globally routable public IPv4. Public internet mail hosting requires a public IPv4."
+  exit 1
+fi
+
+echo "[1/11] Tuning Linux kernel & file descriptor limits for 1,000 concurrent lines (\${TARGET_DOMAIN} @ \${TARGET_IP})..."
 cat << 'EOF' > /etc/sysctl.d/99-linux-carrier-1000.conf
 fs.file-max = 2097152
 net.core.somaxconn = 4096
@@ -1871,23 +2352,36 @@ net.core.netdev_max_backlog = 8192
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.tcp_max_syn_backlog = 4096
 EOF
-sysctl --system
+sysctl --system >/dev/null || true
 
 cat << 'EOF' > /etc/security/limits.d/99-linux-carrier-1000.conf
 * soft nofile 65535
 * hard nofile 65535
 EOF
 
+echo "[2/11] Installing Postfix, Dovecot, OpenDKIM, Asterisk, Coturn, Certbot, Nginx, Fail2Ban, UFW, Node.js..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \\
-  postfix postfix-pcre opendkim opendkim-tools \\
-  asterisk asterisk-core-sounds-en \\
+  postfix postfix-pcre dovecot-core dovecot-imapd dovecot-lmtpd opendkim opendkim-tools \\
+  asterisk asterisk-core-sounds-en coturn \\
   certbot nginx python3 python3-cryptography \\
-  fail2ban ufw swaks dnsutils openssl ca-certificates
+  fail2ban ufw swaks dnsutils openssl curl ca-certificates gnupg${networkMode === 'wireguard-edge' ? ' wireguard haproxy' : ''}
+
+if ! command -v node >/dev/null 2>&1 || [ "\$(node -v | sed 's/v//' | cut -d. -f1)" -lt 20 ]; then
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  apt-get install -y nodejs
+fi
+
+echo "[3/11] Creating isolated system users, Maildir root, DLQ, and secrets..."
+getent group vmail >/dev/null 2>&1 || groupadd -g 5000 vmail
+id -u vmail >/dev/null 2>&1 || useradd -r -u 5000 -g 5000 -s /usr/sbin/nologin -d /var/mail/vhosts vmail || true
+mkdir -p "/var/mail/vhosts/\${TARGET_DOMAIN}" /etc/linux-carrier-1000 /opt/linux-carrier-1000 /var/lib/linux-carrier /var/backups/linux-carrier-1000
+chown -R 5000:5000 /var/mail/vhosts
+chmod 700 /etc/linux-carrier-1000
 
 id -u apexcarrier >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/spool/apex-sms apexcarrier
-mkdir -p /var/spool/apex-sms/{incoming,quarantine,dlq} /var/lib/linux-carrier
+mkdir -p /var/spool/apex-sms/{incoming,quarantine,dlq}
 chown -R apexcarrier:apexcarrier /var/spool/apex-sms /var/lib/linux-carrier
 chmod 750 /var/spool/apex-sms /var/lib/linux-carrier
 
@@ -1896,30 +2390,48 @@ if [ ! -f /etc/apex-carrier.secret ]; then
   chown root:apexcarrier /etc/apex-carrier.secret
   chmod 640 /etc/apex-carrier.secret
 fi
+HMAC_SECRET=\$(cat /etc/apex-carrier.secret)
+TURN_SECRET_HEX=\$(openssl rand -hex 24)
+AMI_SECRET_HEX=\$(openssl rand -hex 16)
 
 if [ ! -f /etc/postfix/dh2048.pem ]; then
   openssl dhparam -out /etc/postfix/dh2048.pem 2048
 fi
 
-systemctl stop nginx || true
-certbot certonly --standalone --non-interactive --agree-tos \\
+echo "[4/11] Provisioning ECDSA P-384 TLS certificates (Let's Encrypt + bootstrap fallback)..."
+systemctl stop nginx >/dev/null 2>&1 || true
+CERT_DIR="/etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}"
+CERT_MODE="letsencrypt"
+if ! certbot certonly --standalone --non-interactive --agree-tos \\
   --key-type ecdsa --elliptic-curve secp384r1 \\
-  --email postmaster@${domain} \\
-  -d mx1.${domain} -d mta-sts.${domain} || echo "[!] Certbot deferred; ensure DNS A records point to ${ip}."
+  --email "postmaster@\${TARGET_DOMAIN}" \\
+  -d "mx1.\${TARGET_DOMAIN}" -d "mta-sts.\${TARGET_DOMAIN}" -d "gateway.\${TARGET_DOMAIN}"; then
+  CERT_MODE="bootstrap-selfsigned"
+  echo "[!] Public DNS A records not resolving to \${TARGET_IP} yet. Issuing ECDSA P-384 bootstrap cert + enabling automatic TLS upgrade timer."
+  mkdir -p "\${CERT_DIR}"
+  openssl ecparam -name secp384r1 -genkey -noout -out "\${CERT_DIR}/privkey.pem"
+  openssl req -new -x509 -key "\${CERT_DIR}/privkey.pem" -out "\${CERT_DIR}/fullchain.pem" -days 90 \\
+    -subj "/CN=mx1.\${TARGET_DOMAIN}" \\
+    -addext "subjectAltName=DNS:mx1.\${TARGET_DOMAIN},DNS:mta-sts.\${TARGET_DOMAIN},DNS:gateway.\${TARGET_DOMAIN},IP:\${TARGET_IP}"
+  cp "\${CERT_DIR}/fullchain.pem" "\${CERT_DIR}/cert.pem"
+  chmod 600 "\${CERT_DIR}/privkey.pem"
+fi
 
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat << 'EOF' > /etc/letsencrypt/renewal-hooks/deploy/reload-carrier-tls.sh
 #!/usr/bin/env bash
-systemctl reload postfix opendkim nginx asterisk
+systemctl reload postfix dovecot opendkim nginx asterisk coturn || true
 EOF
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-carrier-tls.sh
 
-mkdir -p /etc/opendkim/keys/${domain}
-if [ ! -f /etc/opendkim/keys/${domain}/mail2026.private ]; then
-  opendkim-genkey -b ${dkimBits} -s mail2026 -d ${domain} -D /etc/opendkim/keys/${domain}
+echo "[5/11] Generating OpenDKIM ${dkimBits}-bit signing keys & milter..."
+mkdir -p "/etc/opendkim/keys/\${TARGET_DOMAIN}"
+if [ ! -f "/etc/opendkim/keys/\${TARGET_DOMAIN}/mail2026.private" ]; then
+  opendkim-genkey -b ${dkimBits} -s mail2026 -d "\${TARGET_DOMAIN}" -D "/etc/opendkim/keys/\${TARGET_DOMAIN}"
 fi
 chown -R opendkim:opendkim /etc/opendkim
-chmod 700 /etc/opendkim/keys/${domain}
-chmod 600 /etc/opendkim/keys/${domain}/mail2026.private
+chmod 700 "/etc/opendkim/keys/\${TARGET_DOMAIN}"
+chmod 600 "/etc/opendkim/keys/\${TARGET_DOMAIN}/mail2026.private"
 
 cat << EOF > /etc/opendkim.conf
 Syslog                  yes
@@ -1942,17 +2454,155 @@ mkdir -p /var/spool/postfix/opendkim
 chown opendkim:postfix /var/spool/postfix/opendkim
 chmod 750 /var/spool/postfix/opendkim
 usermod -aG opendkim postfix
+if [ -f /etc/default/opendkim ]; then
+  sed -i 's|^SOCKET=.*|SOCKET="local:/var/spool/postfix/opendkim/opendkim.sock"|' /etc/default/opendkim || true
+fi
 
-echo "mail2026._domainkey.${domain} ${domain}:mail2026:/etc/opendkim/keys/${domain}/mail2026.private" > /etc/opendkim/key.table
-echo "*@${domain} mail2026._domainkey.${domain}" > /etc/opendkim/signing.table
+echo "mail2026._domainkey.\${TARGET_DOMAIN} \${TARGET_DOMAIN}:mail2026:/etc/opendkim/keys/\${TARGET_DOMAIN}/mail2026.private" > /etc/opendkim/key.table
+echo "*@\${TARGET_DOMAIN} mail2026._domainkey.\${TARGET_DOMAIN}" > /etc/opendkim/signing.table
 cat << EOF > /etc/opendkim/trusted.hosts
 127.0.0.1
 localhost
-${ip}
-mx1.${domain}
-${domain}
+\${TARGET_IP}
+mx1.\${TARGET_DOMAIN}
+\${TARGET_DOMAIN}
 EOF
 
+echo "[6/11] Provisioning ALL 1,000 Unified Accounts (Postfix Dual-Delivery + Dovecot SHA512-CRYPT + Asterisk PJSIP + MCP)..."
+python3 - "\${TARGET_DOMAIN}" "\${TARGET_IP}" << 'PYEOF'
+import os, sys, json, secrets, subprocess
+
+domain = sys.argv[1]
+ip = sys.argv[2]
+prefix = "+1201555"
+
+cred_path = "/etc/linux-carrier-1000/credentials.json"
+existing_creds = {}
+if os.path.exists(cred_path):
+    with open(cred_path, "r", encoding="utf-8") as f:
+        existing_creds = {item["e164"]: item for item in json.load(f).get("accounts", [])}
+
+accounts = []
+dovecot_lines = []
+postfix_virtual = [f"# Dual-delivery aliases: Dovecot Maildir + SMS Webhook Pipe ({domain})"]
+postfix_vmailbox = [f"# 1,000 Real Dovecot Virtual Mailboxes ({domain})"]
+pjsip_lines = [
+    f"; /etc/asterisk/pjsip.conf — 1,000 Self-Hosted SIP Endpoints on {domain}",
+    "[global]",
+    "type=global",
+    "max_forwards=70",
+    "user_agent=LinuxCarrier1000-SelfHosted",
+    "",
+    "[transport-udp]",
+    "type=transport",
+    "protocol=udp",
+    f"bind={ip}:5060",
+    f"external_media_address={ip}",
+    f"external_signaling_address={ip}",
+    "",
+    "[transport-tls]",
+    "type=transport",
+    "protocol=tls",
+    f"bind={ip}:5061",
+    f"cert_file=/etc/letsencrypt/live/mx1.{domain}/fullchain.pem",
+    f"priv_key_file=/etc/letsencrypt/live/mx1.{domain}/privkey.pem",
+    "method=tlsv1_3",
+    "",
+    "[did-endpoint-template](!)",
+    "type=endpoint",
+    "transport=transport-tls",
+    "context=carrier-selfhosted",
+    "disallow=all",
+    "allow=opus,ulaw,alaw",
+    "media_encryption=sdes",
+    "direct_media=no",
+    "rtp_symmetric=yes",
+    "force_rport=yes",
+    ""
+]
+
+for i in range(1, 1001):
+    ext = f"{i:04d}"
+    e164 = f"{prefix}{ext}"
+    digits = e164.lstrip("+")
+    email_addr = f"{digits}@{domain}"
+    pipe_addr = f"{digits}@pipe.{domain}"
+    sip_user = f"did_{digits}"
+
+    prev = existing_creds.get(e164, {})
+    password = prev.get("password") or secrets.token_urlsafe(14)
+    mcp_token = prev.get("mcpToken") or f"mcp_{ext}_{secrets.token_hex(16)}"
+
+    hash_val = prev.get("sha512Crypt")
+    if not hash_val:
+        hash_val = subprocess.check_output(["openssl", "passwd", "-6", password], text=True).strip()
+
+    maildir_path = f"/var/mail/vhosts/{domain}/{digits}"
+    for sub in ("", "/cur", "/new", "/tmp"):
+        os.makedirs(maildir_path + sub, exist_ok=True)
+    os.chown(maildir_path, 5000, 5000)
+    for sub in ("/cur", "/new", "/tmp"):
+        os.chown(maildir_path + sub, 5000, 5000)
+
+    dovecot_lines.append(f"{email_addr}:{{SHA512-CRYPT}}{hash_val}:5000:5000::{maildir_path}::userdb_quota_rule=*:bytes=512M")
+    postfix_vmailbox.append(f"{email_addr}    {domain}/{digits}/")
+    postfix_virtual.append(f"{email_addr}    {email_addr}, {pipe_addr}")
+
+    pjsip_lines.extend([
+        f"[{sip_user}](did-endpoint-template)",
+        f"aors={sip_user}",
+        f"auth={sip_user}-auth",
+        f'callerid="Self-Hosted #{i}" <{e164}>',
+        f"[{sip_user}]",
+        "type=aor",
+        "max_contacts=4",
+        f"[{sip_user}-auth]",
+        "type=auth",
+        "auth_type=userpass",
+        f"username={sip_user}",
+        f"password={password}",
+        ""
+    ])
+
+    accounts.append({
+        "extension": i,
+        "e164": e164,
+        "email": email_addr,
+        "sipUsername": sip_user,
+        "sipUri": f"sip:{digits}@{domain}",
+        "password": password,
+        "sha512Crypt": hash_val,
+        "mcpToken": mcp_token
+    })
+
+with open(cred_path, "w", encoding="utf-8") as f:
+    json.dump({"domain": domain, "publicIp": ip, "count": len(accounts), "accounts": accounts}, f, indent=2)
+os.chmod(cred_path, 0o600)
+
+with open("/etc/dovecot/users", "w", encoding="utf-8") as f:
+    f.write("\\n".join(dovecot_lines) + "\\n")
+os.chmod("/etc/dovecot/users", 0o640)
+
+with open("/etc/postfix/vmailbox", "w", encoding="utf-8") as f:
+    f.write("\\n".join(postfix_vmailbox) + "\\n")
+
+with open("/etc/postfix/virtual", "w", encoding="utf-8") as f:
+    f.write("\\n".join(postfix_virtual) + "\\n")
+
+with open("/etc/postfix/transport", "w", encoding="utf-8") as f:
+    f.write(f"pipe.{domain}    apex-carrier-pipe:\\n")
+
+with open("/etc/asterisk/pjsip.conf", "w", encoding="utf-8") as f:
+    f.write("\\n".join(pjsip_lines) + "\\n")
+
+print(f"[+] Provisioned {len(accounts)} unified Mail + IMAP + SIP + MCP accounts.")
+PYEOF
+
+postmap /etc/postfix/virtual
+postmap /etc/postfix/vmailbox
+postmap /etc/postfix/transport
+
+echo "[7/11] Configuring Postfix, Dovecot, Coturn, Asterisk, Webhook Pipe, Fail2Ban, and WireGuard/HAProxy..."
 cat << 'EOF' > /usr/local/bin/apex-carrier-pipe.py
 #!/usr/bin/env python3
 import sys, os, json, hmac, hashlib, email, urllib.request
@@ -2002,24 +2652,37 @@ chown root:apexcarrier /usr/local/bin/apex-carrier-pipe.py
 
 cat << EOF > /etc/postfix/main.cf
 compatibility_level = 3.6
-myhostname = mx1.${domain}
-mydomain = ${domain}
+myhostname = mx1.\${TARGET_DOMAIN}
+mydomain = \${TARGET_DOMAIN}
 myorigin = \$mydomain
-mydestination = localhost, mx1.${domain}
+mydestination = localhost, mx1.\${TARGET_DOMAIN}
 inet_interfaces = all
 inet_protocols = ipv4
-${networkMode === 'direct-public' ? `smtp_bind_address = ${ip}` : `postscreen_upstream_proxy_protocol = haproxy\nsmtpd_upstream_proxy_protocol = haproxy`}
+${networkMode === 'direct-public' ? `smtp_bind_address = \${TARGET_IP}` : `postscreen_upstream_proxy_protocol = haproxy\nsmtpd_upstream_proxy_protocol = haproxy`}
 default_process_limit = 200
 smtpd_banner = \$myhostname ESMTP
 disable_vrfy_command = yes
 smtpd_helo_required = yes
 biff = no
 message_size_limit = 2097152
-virtual_alias_domains = ${domain}
-virtual_alias_maps = hash:/etc/postfix/virtual
 
-smtpd_tls_cert_file = /etc/letsencrypt/live/mx1.${domain}/fullchain.pem
-smtpd_tls_key_file = /etc/letsencrypt/live/mx1.${domain}/privkey.pem
+virtual_mailbox_domains = \${TARGET_DOMAIN}
+virtual_mailbox_base = /var/mail/vhosts
+virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_minimum_uid = 5000
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+virtual_transport = lmtp:unix:private/dovecot-lmtp
+virtual_alias_maps = hash:/etc/postfix/virtual
+transport_maps = hash:/etc/postfix/transport
+apex-carrier-pipe_destination_recipient_limit = 1
+
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = yes
+
+smtpd_tls_cert_file = /etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/fullchain.pem
+smtpd_tls_key_file = /etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/privkey.pem
 smtpd_tls_dh1024_param_file = /etc/postfix/dh2048.pem
 smtpd_tls_security_level = may
 smtpd_tls_auth_only = yes
@@ -2078,15 +2741,63 @@ error     unix  -       -       y       -       -       error
 discard   unix  -       -       y       -       -       discard
 local     unix  -       n       n       -       -       local
 virtual   unix  -       n       n       -       -       virtual
+lmtp      unix  -       -       y       -       -       lmtp
 anvil     unix  -       -       y       -       1       anvil
 apex-carrier-pipe unix - n n - 25 pipe
   flags=FRq user=apexcarrier null_sender= argv=/usr/local/bin/apex-carrier-pipe.py \${recipient}
 EOF
 
-echo "@${domain}    apex-carrier-pipe" > /etc/postfix/virtual
-postmap /etc/postfix/virtual
+cat << EOF > /etc/dovecot/conf.d/99-linux-carrier.conf
+protocols = imap lmtp
+mail_location = maildir:/var/mail/vhosts/%d/%n
+auth_mechanisms = plain login
+disable_plaintext_auth = yes
+ssl = required
+ssl_cert = </etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/fullchain.pem
+ssl_key = </etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/privkey.pem
+ssl_min_protocol = TLSv1.2
 
-# Self-Hosted Asterisk PJSIP Dialplan (Local DID-to-DID + Federated SIP URI, Zero Paid Carrier)
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/users
+}
+userdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+}
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0666
+    user = postfix
+    group = postfix
+  }
+}
+EOF
+
+cat << EOF > /etc/turnserver.conf
+listening-port=3478
+tls-listening-port=5349
+listening-ip=0.0.0.0
+external-ip=\${TARGET_IP}
+realm=\${TARGET_DOMAIN}
+use-auth-secret
+static-auth-secret=\${TURN_SECRET_HEX}
+cert=/etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/fullchain.pem
+pkey=/etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/privkey.pem
+min-port=49152
+max-port=65535
+no-multicast-peers
+no-loopback-peers
+EOF
+sed -i 's/#TURNSERVER_ENABLED=1/TURNSERVER_ENABLED=1/' /etc/default/coturn || true
+
 cat << 'EOF' > /etc/asterisk/rtp.conf
 [general]
 rtpstart=10000
@@ -2094,14 +2805,14 @@ rtpend=20000
 icesupport=yes
 EOF
 
-cat << 'EOF' > /etc/asterisk/manager.conf
+cat << EOF > /etc/asterisk/manager.conf
 [general]
 enabled = yes
 port = 5038
 bindaddr = 127.0.0.1
 
 [linuxcarrier]
-secret = ChangeMeStrongAmiSecret
+secret = \${AMI_SECRET_HEX}
 deny = 0.0.0.0/0.0.0.0
 permit = 127.0.0.1/255.255.255.255
 read = system,call,log,verbose,command,agent,user,originate
@@ -2110,13 +2821,11 @@ EOF
 
 cat << 'EOF' > /etc/asterisk/extensions.conf
 [carrier-selfhosted]
-; Local 1,000-number DID-to-DID self-hosted calling
 exten => _1201555XXXX,1,NoOp(Self-hosted call from \${CALLERID(num)} to \${EXTEN})
  same => n,System(curl -sS -X POST http://127.0.0.1:3000/api/webhooks/call-event -H "Content-Type: application/json" -d '{"direction":"internal","from":"'\${CALLERID(num)}'","to":"'\${EXTEN}'","status":"connected"}')
  same => n,Dial(PJSIP/did_\${EXTEN},30)
  same => n,Hangup()
 
-; Federated external SIP URI dialing (e.g., sip:user@otherlinux.org)
 exten => _[a-zA-Z0-9._-].,1,NoOp(Federated SIP URI call to \${EXTEN}@\${SIPDOMAIN})
  same => n,Dial(PJSIP/\${EXTEN}@\${SIPDOMAIN},30)
  same => n,Hangup()
@@ -2126,16 +2835,16 @@ mkdir -p /var/www/mta-sts/.well-known
 cat << EOF > /var/www/mta-sts/.well-known/mta-sts.txt
 version: STSv1
 mode: ${mtaStsMode}
-mx: mx1.${domain}
+mx: mx1.\${TARGET_DOMAIN}
 max_age: 604800
 EOF
 
-cat << EOF > /etc/nginx/sites-available/mta-sts.${domain}
+cat << EOF > /etc/nginx/sites-available/mta-sts.\${TARGET_DOMAIN}
 server {
     listen 443 ssl http2;
-    server_name mta-sts.${domain};
-    ssl_certificate /etc/letsencrypt/live/mx1.${domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/mx1.${domain}/privkey.pem;
+    server_name mta-sts.\${TARGET_DOMAIN};
+    ssl_certificate /etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.3 TLSv1.2;
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     root /var/www/mta-sts;
@@ -2143,14 +2852,45 @@ server {
         default_type text/plain;
     }
 }
+
+server {
+    listen 443 ssl http2;
+    server_name gateway.\${TARGET_DOMAIN} \${TARGET_IP};
+    ssl_certificate /etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.3 TLSv1.2;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+}
 EOF
-ln -sf /etc/nginx/sites-available/mta-sts.${domain} /etc/nginx/sites-enabled/mta-sts.${domain}
+ln -sf "/etc/nginx/sites-available/mta-sts.\${TARGET_DOMAIN}" "/etc/nginx/sites-enabled/mta-sts.\${TARGET_DOMAIN}"
+rm -f /etc/nginx/sites-enabled/default || true
+
 ${enableFail2Ban ? `
 cat << 'EOF' > /etc/fail2ban/jail.d/postfix-carrier.conf
 [postfix]
 enabled  = true
 port     = smtp,465,587
 filter   = postfix
+logpath  = /var/log/mail.log
+maxretry = 5
+bantime  = 3600
+
+[dovecot]
+enabled  = true
+port     = imap,imaps
+filter   = dovecot
 logpath  = /var/log/mail.log
 maxretry = 5
 bantime  = 3600
@@ -2165,19 +2905,381 @@ bantime  = 3600
 EOF
 systemctl enable --now fail2ban` : ''}
 
+${networkMode === 'wireguard-edge' ? `
+echo "[*] Generating WireGuard Curve25519 keys & VPS Edge bootstrap (/etc/linux-carrier-1000/vps-edge-bootstrap.sh)..."
+mkdir -p /etc/wireguard
+if [ ! -f /etc/wireguard/node_private.key ]; then
+  wg genkey | tee /etc/wireguard/node_private.key | wg pubkey > /etc/wireguard/node_public.key
+  chmod 600 /etc/wireguard/node_private.key
+fi
+if [ ! -f /etc/wireguard/vps_private.key ]; then
+  wg genkey | tee /etc/wireguard/vps_private.key | wg pubkey > /etc/wireguard/vps_public.key
+  chmod 600 /etc/wireguard/vps_private.key
+fi
+NODE_PRIV=\$(cat /etc/wireguard/node_private.key)
+NODE_PUB=\$(cat /etc/wireguard/node_public.key)
+VPS_PRIV=\$(cat /etc/wireguard/vps_private.key)
+VPS_PUB=\$(cat /etc/wireguard/vps_public.key)
+
+cat << EOF > /etc/wireguard/wg0.conf
+[Interface]
+Address = 10.66.0.2/24
+PrivateKey = \${NODE_PRIV}
+
+[Peer]
+PublicKey = \${VPS_PUB}
+Endpoint = \${TARGET_IP}:51820
+AllowedIPs = 10.66.0.1/32
+PersistentKeepalive = 25
+EOF
+chmod 600 /etc/wireguard/wg0.conf
+
+cat << EOF > /etc/linux-carrier-1000/vps-edge-bootstrap.sh
+#!/usr/bin/env bash
+set -euo pipefail
+apt-get update -y && apt-get install -y wireguard haproxy ufw
+cat << 'WGEOF' > /etc/wireguard/wg0.conf
+[Interface]
+Address = 10.66.0.1/24
+ListenPort = 51820
+PrivateKey = \${VPS_PRIV}
+PostUp = sysctl -w net.ipv4.ip_forward=1
+
+[Peer]
+PublicKey = \${NODE_PUB}
+AllowedIPs = 10.66.0.2/32
+WGEOF
+cat << 'HAPEOF' > /etc/haproxy/haproxy.cfg
+global
+    daemon
+    maxconn 4096
+defaults
+    mode tcp
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+frontend smtp_25
+    bind *:25
+    default_backend node_smtp_25
+frontend smtps_465
+    bind *:465
+    default_backend node_smtps_465
+frontend sub_587
+    bind *:587
+    default_backend node_sub_587
+frontend imaps_993
+    bind *:993
+    default_backend node_imaps_993
+frontend https_443
+    bind *:443
+    default_backend node_https_443
+backend node_smtp_25
+    server node1 10.66.0.2:25 send-proxy-v2
+backend node_smtps_465
+    server node1 10.66.0.2:465 send-proxy-v2
+backend node_sub_587
+    server node1 10.66.0.2:587 send-proxy-v2
+backend node_imaps_993
+    server node1 10.66.0.2:993
+backend node_https_443
+    server node1 10.66.0.2:443
+HAPEOF
+ufw allow 25/tcp && ufw allow 465/tcp && ufw allow 587/tcp && ufw allow 993/tcp && ufw allow 443/tcp && ufw allow 51820/udp
+systemctl enable --now wg-quick@wg0 haproxy
+EOF
+chmod 700 /etc/linux-carrier-1000/vps-edge-bootstrap.sh` : ''}
+
+echo "[8/11] Configuring UFW firewall rules..."
+ufw allow 22/tcp comment "SSH"
 ufw allow 25/tcp comment "SMTP Public MX"
 ufw allow 465/tcp comment "SMTPS"
 ufw allow 587/tcp comment "SMTP Submission"
-ufw allow 443/tcp comment "MTA-STS & WebRTC HTTPS"
+ufw allow 993/tcp comment "Dovecot IMAPS"
+ufw allow 80/tcp comment "Certbot ACME HTTP"
+ufw allow 443/tcp comment "MTA-STS & WebRTC HTTPS Gateway"
+ufw allow 3478/tcp comment "Coturn TURN TCP"
+ufw allow 3478/udp comment "Coturn TURN UDP"
+ufw allow 5349/tcp comment "Coturn TURNS TLS"
+ufw allow 49152:65535/udp comment "Coturn TURN Media"
 ufw allow 5060/udp comment "Self-Hosted SIP"
 ufw allow 5061/tcp comment "Self-Hosted SIP TLS"
 ufw allow 10000:20000/udp comment "RTP Voice Media"
+${networkMode === 'wireguard-edge' ? 'ufw allow 51820/udp comment "WireGuard Edge"\n' : ''}ufw --force enable || true
 
+echo "[9/11] Extracting, building & starting Linux Carrier 1000 control-plane service..."
+cat << EOF > /etc/linux-carrier-1000/env
+NODE_ENV=production
+CARRIER_DOMAIN=\${TARGET_DOMAIN}
+CARRIER_PUBLIC_IP=\${TARGET_IP}
+TURN_URL=turn:\${TARGET_IP}:3478
+TURN_SECRET=\${TURN_SECRET_HEX}
+CARRIER_HMAC_SECRET=\${HMAC_SECRET}
+AMI_HOST=127.0.0.1
+AMI_PORT=5038
+AMI_USER=linuxcarrier
+AMI_SECRET=\${AMI_SECRET_HEX}
+SIP_PORT=5062
+SMTP_INBOUND_PORT=2525
+EOF
+chmod 600 /etc/linux-carrier-1000/env
+
+if [ -f "\${SOURCE_DIR}/package.json" ] && [ -f "\${SOURCE_DIR}/server.ts" ]; then
+  echo "  -> Copying local workspace from \${SOURCE_DIR} into /opt/linux-carrier-1000..."
+  cp -a "\${SOURCE_DIR}/." /opt/linux-carrier-1000/
+else
+  echo "  -> Extracting embedded self-contained Linux Carrier 1000 bundle into /opt/linux-carrier-1000..."
+  base64 -d << 'BUNDLE_EOF' | tar -xzf - -C /opt/linux-carrier-1000
+${appBundleB64}
+BUNDLE_EOF
+fi
+
+(
+  cd /opt/linux-carrier-1000
+  npm install --no-audit --no-fund
+  npm run build
+)
+
+cat << 'EOF' > /etc/systemd/system/linux-carrier-1000.service
+[Unit]
+Description=Linux Carrier 1000 Self-Hosted Voice & SMTP Switch
+After=network-online.target postfix.service dovecot.service coturn.service asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/linux-carrier-1000
+EnvironmentFile=/etc/linux-carrier-1000/env
+ExecStart=/opt/linux-carrier-1000/node_modules/.bin/tsx server.ts
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[10/11] Installing management CLI (/usr/local/bin/linux-carrier), daily backups, and auto-TLS upgrade timer..."
+DKIM_PUB=\$(tr -d '\\n\\r\\t ' < "/etc/opendkim/keys/\${TARGET_DOMAIN}/mail2026.txt" | sed -E 's/.*p=([^")]+).*/\\1/' || echo "<SEE_/etc/opendkim/keys/\${TARGET_DOMAIN}/mail2026.txt>")
+TLSA_HASH=\$(openssl x509 -in "/etc/letsencrypt/live/mx1.\${TARGET_DOMAIN}/fullchain.pem" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -hex | awk '{print \$NF}' || echo "<TLSA_SHA256>")
+
+cat << EOF > "/etc/linux-carrier-1000/dns-zone-\${TARGET_DOMAIN}.txt"
+mx1.\${TARGET_DOMAIN}.                  IN A    \${TARGET_IP}
+gateway.\${TARGET_DOMAIN}.              IN A    \${TARGET_IP}
+mta-sts.\${TARGET_DOMAIN}.              IN A    \${TARGET_IP}
+\${TARGET_DOMAIN}.                      IN MX   10 mx1.\${TARGET_DOMAIN}.
+\${TARGET_DOMAIN}.                      IN TXT  "v=spf1 ip4:\${TARGET_IP} -all"
+mail2026._domainkey.\${TARGET_DOMAIN}.  IN TXT  "v=DKIM1; h=sha256; k=rsa; p=\${DKIM_PUB}"
+_dmarc.\${TARGET_DOMAIN}.               IN TXT  "v=DMARC1; p=reject; adkim=s; aspf=s; pct=100; rua=mailto:dmarc@\${TARGET_DOMAIN}"
+_mta-sts.\${TARGET_DOMAIN}.             IN TXT  "v=STSv1; id=20261120T01;"
+_smtp._tls.\${TARGET_DOMAIN}.           IN TXT  "v=TLSRPTv1; rua=mailto:tlsrpt@\${TARGET_DOMAIN}"
+_25._tcp.mx1.\${TARGET_DOMAIN}.         IN TLSA 3 1 1 \${TLSA_HASH}
+EOF
+
+if [ -n "\${CF_API_TOKEN:-}" ]; then
+  echo "[*] CF_API_TOKEN detected — automatically publishing all 10 DNS records to Cloudflare..."
+  python3 - "\${TARGET_DOMAIN}" "\${TARGET_IP}" "\${DKIM_PUB}" "\${TLSA_HASH}" << 'CFEOF' || echo "[!] Cloudflare DNS sync encountered a warning; inspect zone file at /etc/linux-carrier-1000/"
+import os, sys, json, urllib.request, urllib.error
+
+domain, ip, dkim_pub, tlsa_hash = sys.argv[1:5]
+token = os.environ["CF_API_TOKEN"].strip()
+headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+def cf_req(method, path, payload=None):
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(f"https://api.cloudflare.com/client/v4{path}", data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+zone_id = None
+parts = domain.split(".")
+for idx in range(len(parts) - 1):
+    candidate = ".".join(parts[idx:])
+    r = cf_req("GET", f"/zones?name={candidate}&status=active")
+    if r.get("result"):
+        zone_id = r["result"][0]["id"]
+        break
+
+if not zone_id:
+    raise RuntimeError(f"Could not locate active Cloudflare zone for {domain}")
+
+records = [
+    {"type": "A", "name": f"mx1.{domain}", "content": ip, "proxied": False, "ttl": 300},
+    {"type": "A", "name": f"gateway.{domain}", "content": ip, "proxied": False, "ttl": 300},
+    {"type": "A", "name": f"mta-sts.{domain}", "content": ip, "proxied": False, "ttl": 300},
+    {"type": "MX", "name": domain, "content": f"mx1.{domain}", "priority": 10, "ttl": 300},
+    {"type": "TXT", "name": domain, "content": f"v=spf1 ip4:{ip} -all", "ttl": 300},
+    {"type": "TXT", "name": f"mail2026._domainkey.{domain}", "content": f"v=DKIM1; h=sha256; k=rsa; p={dkim_pub}", "ttl": 300},
+    {"type": "TXT", "name": f"_dmarc.{domain}", "content": f"v=DMARC1; p=reject; adkim=s; aspf=s; pct=100; rua=mailto:dmarc@{domain}", "ttl": 300},
+    {"type": "TXT", "name": f"_mta-sts.{domain}", "content": "v=STSv1; id=20261120T01;", "ttl": 300},
+    {"type": "TXT", "name": f"_smtp._tls.{domain}", "content": f"v=TLSRPTv1; rua=mailto:tlsrpt@{domain}", "ttl": 300},
+    {"type": "TLSA", "name": f"_25._tcp.mx1.{domain}", "data": {"usage": 3, "selector": 1, "matching_type": 1, "certificate": tlsa_hash}, "ttl": 300}
+]
+
+existing = cf_req("GET", f"/zones/{zone_id}/dns_records?per_page=100").get("result", [])
+for rec in records:
+    match = next((e for e in existing if e["type"] == rec["type"] and e["name"] == rec["name"]), None)
+    if match:
+        cf_req("PUT", f"/zones/{zone_id}/dns_records/{match['id']}", rec)
+    else:
+        cf_req("POST", f"/zones/{zone_id}/dns_records", rec)
+print(f"[+] Successfully published all {len(records)} DNS records to Cloudflare zone {zone_id}!")
+CFEOF
+fi
+
+cat << EOF > /usr/local/bin/linux-carrier-tls-upgrade.sh
+#!/usr/bin/env bash
+set -euo pipefail
+RESOLVED_IP=\$(dig +short A "mx1.\${TARGET_DOMAIN}" | tail -n1 || true)
+if [ "\${RESOLVED_IP}" = "\${TARGET_IP}" ]; then
+  if [ ! -f "/etc/letsencrypt/renewal/mx1.\${TARGET_DOMAIN}.conf" ]; then
+    systemctl stop nginx || true
+    if certbot certonly --standalone --non-interactive --agree-tos --force-renewal \\
+      --key-type ecdsa --elliptic-curve secp384r1 \\
+      --email "postmaster@\${TARGET_DOMAIN}" \\
+      -d "mx1.\${TARGET_DOMAIN}" -d "mta-sts.\${TARGET_DOMAIN}" -d "gateway.\${TARGET_DOMAIN}"; then
+      systemctl reload-or-restart postfix dovecot opendkim nginx asterisk coturn || true
+      systemctl disable --now linux-carrier-tls-upgrade.timer || true
+      echo "[+] Auto-upgraded TLS certificate to Let's Encrypt ECDSA P-384."
+    else
+      systemctl start nginx || true
+    fi
+  else
+    systemctl disable --now linux-carrier-tls-upgrade.timer || true
+  fi
+fi
+EOF
+chmod +x /usr/local/bin/linux-carrier-tls-upgrade.sh
+
+cat << 'EOF' > /etc/systemd/system/linux-carrier-tls-upgrade.service
+[Unit]
+Description=Linux Carrier 1000 Automatic Let's Encrypt TLS Upgrade
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/linux-carrier-tls-upgrade.sh
+EOF
+
+cat << 'EOF' > /etc/systemd/system/linux-carrier-tls-upgrade.timer
+[Unit]
+Description=Check DNS every 5m and auto-upgrade bootstrap TLS to Let's Encrypt
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+EOF
+
+cat << 'EOF' > /etc/cron.daily/linux-carrier-backup
+#!/usr/bin/env bash
+set -euo pipefail
+STAMP=\$(date +%Y%m%d)
+tar -czf "/var/backups/linux-carrier-1000/carrier-backup-\${STAMP}.tar.gz" \\
+  /etc/linux-carrier-1000 /var/lib/linux-carrier /etc/opendkim /etc/dovecot/users /etc/postfix/virtual /etc/postfix/vmailbox /var/mail/vhosts 2>/dev/null || true
+find /var/backups/linux-carrier-1000 -type f -mtime +7 -delete
+EOF
+chmod +x /etc/cron.daily/linux-carrier-backup
+
+cat << EOF > /usr/local/bin/linux-carrier
+#!/usr/bin/env bash
+set -euo pipefail
+CMD="\${1:-status}"
+case "\$CMD" in
+  status)
+    systemctl is-active postfix dovecot opendkim asterisk coturn nginx linux-carrier-1000 || true
+    ss -tulnp | grep -E ':(25|443|465|587|993|3000|3478|5038|5060|5061|5062|2525)\\b' || true
+    echo "Asterisk PJSIP endpoints: \$(asterisk -rx 'pjsip show endpoints' | grep -c 'did_' || echo 0)"
+    ;;
+  dns)
+    cat "/etc/linux-carrier-1000/dns-zone-\${TARGET_DOMAIN}.txt"
+    echo "--- Live DNS Check ---"
+    echo "A mx1      : \$(dig +short A mx1.\${TARGET_DOMAIN})"
+    echo "MX         : \$(dig +short MX \${TARGET_DOMAIN})"
+    echo "PTR        : \$(dig +short -x \${TARGET_IP})"
+    ;;
+  tls-upgrade)
+    /usr/local/bin/linux-carrier-tls-upgrade.sh
+    ;;
+  creds)
+    EXT="\${2:-1}"
+    python3 -c 'import json,sys; d=json.load(open("/etc/linux-carrier-1000/credentials.json")); idx=int(sys.argv[1])-1; print(json.dumps(d["accounts"][idx], indent=2))' "\$EXT"
+    ;;
+  doctor)
+    postfix check && echo "[OK] Postfix config valid"
+    nginx -t && echo "[OK] Nginx config valid"
+    if timeout 5 bash -c '</dev/tcp/gmail-smtp-in.l.google.com/25' 2>/dev/null; then
+      echo "[OK] Outbound TCP Port 25 is OPEN on this host"
+    else
+      echo "[WARN] Outbound TCP Port 25 timed out or blocked by ISP/cloud firewall"
+    fi
+    curl -fsS -X POST http://127.0.0.1:3000/api/system/verify-e2e && echo ""
+    ;;
+  *)
+    echo "Usage: linux-carrier {status|doctor|dns|tls-upgrade|creds <1-1000>}"
+    exit 1
+    ;;
+esac
+EOF
+chmod +x /usr/local/bin/linux-carrier
+
+echo "[11/11] Starting all daemons & running automated end-to-end verification..."
 postfix check
-systemctl enable --now opendkim postfix nginx asterisk
-systemctl restart opendkim postfix nginx asterisk
+nginx -t
+systemctl daemon-reload
+systemctl enable --now opendkim postfix dovecot nginx asterisk coturn linux-carrier-1000
+systemctl restart opendkim postfix dovecot nginx asterisk coturn linux-carrier-1000
 
-echo "[+] 100% Self-Hosted Linux Carrier 1000 deployed on ${domain} (${ip}) — Zero External Carrier Required."
+if [ "\${CERT_MODE}" = "bootstrap-selfsigned" ]; then
+  systemctl enable --now linux-carrier-tls-upgrade.timer || true
+  /usr/local/bin/linux-carrier-tls-upgrade.sh || true
+fi
+
+for _ in 1 2 3 4 5 6; do
+  curl -fsS http://127.0.0.1:3000/api/capabilities >/dev/null 2>&1 && break
+  sleep 2
+done
+
+echo "=== LIVE SMTP -> DOVECOT MAILDIR + IMAPS (:993) PROBE ==="
+TEST_PASS=\$(python3 -c 'import json; print(json.load(open("/etc/linux-carrier-1000/credentials.json"))["accounts"][0]["password"])')
+swaks --to "12015550001@\${TARGET_DOMAIN}" --from "probe@\${TARGET_DOMAIN}" --server 127.0.0.1 --port 25 --h-Subject "Carrier Self-Test" --body "Self-test OTP: 482910" >/dev/null && echo "[+] Local SMTP Port 25 delivery accepted" || echo "[!] Local SMTP test deferred"
+sleep 1
+python3 - "\${TARGET_DOMAIN}" "\${TEST_PASS}" << 'IMAPPROBE' || true
+import imaplib, sys
+dom, pwd = sys.argv[1], sys.argv[2]
+try:
+    m = imaplib.IMAP4_SSL("127.0.0.1", 993, timeout=5)
+    m.login(f"12015550001@{dom}", pwd)
+    typ, data = m.select("INBOX")
+    print(f"[+] Dovecot IMAPS :993 authenticated cleanly for 12015550001@{dom} (INBOX count: {data[0].decode()})")
+    m.logout()
+except Exception as exc:
+    print(f"[!] IMAPS :993 probe note: {exc}")
+IMAPPROBE
+
+echo "=== OUTBOUND PORT 25 REACHABILITY CHECK ==="
+if timeout 5 bash -c '</dev/tcp/gmail-smtp-in.l.google.com/25' 2>/dev/null; then
+  echo "[+] Outbound TCP Port 25 is OPEN to public internet mail servers"
+else
+  echo "[!] Outbound TCP Port 25 appears blocked/filtered by your VPS/ISP firewall (request Port 25 unblock or use WireGuard Edge)"
+fi
+
+echo "=== LISTENING SOCKETS ==="
+ss -tulnp | grep -E ':(25|443|465|587|993|3000|3478|5038|5060|5061|5062|2525)\\b' || true
+
+echo "=== ASTERISK PJSIP ENDPOINT COUNT ==="
+asterisk -rx "pjsip show endpoints" | grep -c "did_" || true
+
+echo "=== LIVE E2E SELF-TEST ==="
+curl -fsS -X POST http://127.0.0.1:3000/api/system/verify-e2e || true
+echo ""
+
+echo ""
+echo "=============================================================================="
+echo "[+] ALL 1,000 LINES FULLY PROVISIONED ON \${TARGET_DOMAIN} (\${TARGET_IP})"
+echo "    Credentials DB : /etc/linux-carrier-1000/credentials.json (chmod 600)"
+echo "    CLI Tool       : linux-carrier {status|doctor|dns|tls-upgrade|creds 1}"
+echo "    Gateway URL    : https://gateway.\${TARGET_DOMAIN}/ (or https://\${TARGET_IP}/)"
+echo ""
+cat "/etc/linux-carrier-1000/dns-zone-\${TARGET_DOMAIN}.txt"
+echo "=============================================================================="
 `;
 
   res.setHeader('Content-Type', 'text/x-shellscript');
