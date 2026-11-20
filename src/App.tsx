@@ -108,7 +108,7 @@ export default function App() {
 
       <footer className="border-t border-slate-900 py-5 px-6 text-xs text-slate-500">
         <div className="max-w-[1440px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>Linux Carrier 1000 · Real Port 25 SMTP &amp; Asterisk PJSIP Gateway</span>
+          <span>Linux Carrier 1000 · 100% Self-Hosted WebRTC, SIP UDP, Asterisk &amp; Port 25 SMTP Gateway</span>
           <span className="font-mono text-slate-500">
             {domain} · {publicIp}
           </span>

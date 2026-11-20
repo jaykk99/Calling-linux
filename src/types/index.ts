@@ -4,13 +4,15 @@ export interface VirtualNumber {
   e164: string;
   extension: number;
   assignedEmail: string;
+  sipUri: string;
   sipUsername: string;
-  carrierGateway: string;
+  routingMode: 'self-hosted' | 'federated-sip' | 'webhook';
   status: 'active' | 'idle' | 'reserved' | 'forwarding';
   label: string;
   webhookUrl: string;
   voiceEnabled: boolean;
   smsEnabled: boolean;
+  sipRegistered?: boolean;
   totalReceived: number;
   totalSent: number;
   totalCalls: number;
@@ -20,15 +22,15 @@ export interface VirtualNumber {
 
 export interface SmsMessage {
   id: string;
-  direction: 'inbound' | 'outbound';
+  direction: 'inbound' | 'outbound' | 'internal';
   from: string;
   to: string;
   body: string;
   timestamp: string;
-  carrier: string;
+  transport: string;
   otpCode?: string;
   status: 'delivered' | 'received' | 'queued' | 'failed';
-  deliveryMode?: 'live-smtp' | 'local-postfix' | 'webhook' | 'test-trigger';
+  deliveryMode?: 'self-hosted-direct' | 'local-postfix' | 'embedded-smtp' | 'federated-smtp' | 'webhook' | 'test-trigger';
   smtpTranscript?: string;
   rawMime?: string;
   port25Verified: boolean;
@@ -37,14 +39,14 @@ export interface SmsMessage {
 
 export interface CallRecord {
   id: string;
-  direction: 'inbound' | 'outbound';
+  direction: 'inbound' | 'outbound' | 'internal';
   from: string;
   to: string;
   status: 'ringing' | 'connected' | 'completed' | 'failed';
   durationSec: number;
   timestamp: string;
   codec: string;
-  sipTrunk: string;
+  transport: string;
   channel?: string;
   detail: string;
 }
@@ -87,15 +89,6 @@ export interface DiagnosticReport {
   };
 }
 
-export interface CarrierGatewayInfo {
-  carrier: string;
-  country: string;
-  smsGateway: string;
-  mmsGateway: string;
-  charLimit: number;
-  notes: string;
-}
-
 export interface SystemCapabilities {
   hostname: string;
   platform: string;
@@ -109,6 +102,14 @@ export interface SystemCapabilities {
   loadAvg: number[];
   isRoot: boolean;
   persistencePath: string;
+  embeddedServices: {
+    sipUdpPort: number | null;
+    sipActive: boolean;
+    smtpListenPort: number | null;
+    smtpActive: boolean;
+    webrtcOnlineLines: string[];
+    sipRegisteredLines: string[];
+  };
   binaries: {
     name: string;
     path: string | null;
@@ -128,6 +129,7 @@ export interface SystemCapabilities {
     ephemeralPorts: string;
   };
   readiness1000: {
+    canRunSelfHosted1000: boolean;
     canRunNodeGateway: boolean;
     canSendLiveSmtp: boolean;
     canTerminateCalls: boolean;

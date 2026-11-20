@@ -18,9 +18,8 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
   onSuccess
 }) => {
   const [targetExtension, setTargetExtension] = useState('0001');
-  const [fromPhone, setFromPhone] = useState('+1 (415) 890-3321');
-  const [carrierName, setCarrierName] = useState('Verizon Wireless (vtext.com)');
-  const [body, setBody] = useState('Your verification code is 847291. Do not share this code with anyone.');
+  const [fromPhone, setFromPhone] = useState('+12015550002');
+  const [body, setBody] = useState('Your self-hosted verification code is 847291. Delivered over RFC 5321 SMTP.');
   const [sending, setSending] = useState(false);
 
   useEffect(() => {
@@ -31,20 +30,17 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
 
   if (!isOpen) return null;
 
-  const applyPreset = (type: 'otp' | 'bank' | 'alert') => {
+  const applyPreset = (type: 'otp' | 'security' | 'probe') => {
     const randomOtp = Math.floor(100000 + Math.random() * 900000);
     if (type === 'otp') {
-      setFromPhone('+1 (888) 204-5910');
-      setCarrierName('AT&T Mobility (txt.att.net)');
-      setBody(`Auth code: ${randomOtp}. Use this code within 5 minutes to verify your Linux Carrier login.`);
-    } else if (type === 'bank') {
-      setFromPhone('+1 (800) 935-9935');
-      setCarrierName('T-Mobile US (tmomail.net)');
-      setBody(`Security Alert: Confirm $450.00 wire transfer using passcode ${randomOtp}. Reply STOP to cancel.`);
+      setFromPhone('+12015550002');
+      setBody(`Auth code: ${randomOtp}. Use this code within 5 minutes to verify your login.`);
+    } else if (type === 'security') {
+      setFromPhone('+12015550042');
+      setBody(`SSH Bastion Alert: Confirm sudo elevation using one-time passcode ${randomOtp}.`);
     } else {
-      setFromPhone('+1 (650) 555-0148');
-      setCarrierName('Direct SMTP Gateway');
-      setBody('SMTP Port 25 MX routing heartbeat verified. TLS 1.3 cipher active on mx1.');
+      setFromPhone('+12015550003');
+      setBody(`Self-hosted SMTP RFC 5321 health check passed for ${domain}.`);
     }
   };
 
@@ -59,8 +55,7 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
         body: JSON.stringify({
           fromPhone,
           targetNumberId: targetId,
-          body,
-          carrierName
+          body
         })
       });
       if (res.ok) {
@@ -79,8 +74,8 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
           <div className="flex items-center gap-2.5">
             <ArrowDownLeft className="w-4 h-4 text-cyan-400" />
             <div>
-              <h3 className="text-base font-semibold text-slate-100">Simulate Inbound Port 25 SMS</h3>
-              <p className="text-xs text-slate-400">Emulate an external carrier delivering mail to Postfix pipe</p>
+              <h3 className="text-base font-semibold text-slate-100">Test Direct Inbound SMTP SMS</h3>
+              <p className="text-xs text-slate-400">Transmits a real RFC 5321 message through the self-hosted SMTP listener</p>
             </div>
           </div>
           <button
@@ -102,14 +97,14 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => applyPreset('bank')}
+            onClick={() => applyPreset('security')}
             className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors"
           >
-            Banking Verification
+            SSH Security Alert
           </button>
           <button
             type="button"
-            onClick={() => applyPreset('alert')}
+            onClick={() => applyPreset('probe')}
             className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors"
           >
             SMTP Probe
@@ -137,7 +132,7 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
 
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                Sender Phone / Shortcode
+                Sender DID / Address
               </label>
               <input
                 type="text"
@@ -147,18 +142,6 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
                 className="w-full px-3 py-2 text-sm font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
               />
             </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5">
-              Originating Carrier Gateway
-            </label>
-            <input
-              type="text"
-              value={carrierName}
-              onChange={(e) => setCarrierName(e.target.value)}
-              className="w-full px-3 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
-            />
           </div>
 
           <div>
@@ -188,7 +171,7 @@ export const SimulateInboundModal: React.FC<SimulateInboundModalProps> = ({
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg disabled:opacity-50"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              {sending ? 'Delivering via Port 25...' : 'Deliver Inbound SMS'}
+              {sending ? 'Sending over SMTP...' : 'Send Inbound SMTP SMS'}
             </button>
           </div>
         </form>

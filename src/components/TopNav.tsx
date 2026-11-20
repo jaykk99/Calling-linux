@@ -56,7 +56,7 @@ export const TopNav: React.FC<TopNavProps> = ({
           onClick={onOpenSimulateModal}
           className="px-4 py-2 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-sm shadow-cyan-900/30"
         >
-          Simulate Inbound SMS
+          Test Inbound SMTP
         </button>
       </div>
     </header>

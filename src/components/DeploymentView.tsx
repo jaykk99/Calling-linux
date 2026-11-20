@@ -51,7 +51,7 @@ export const DeploymentView: React.FC<DeploymentViewProps> = ({
 
   // Hardened Public-Network Security Profile Controls
   const [networkMode, setNetworkMode] = useState<'direct-public' | 'wireguard-edge'>('direct-public');
-  const [webhookUrl, setWebhookUrl] = useState(`https://gateway.${domain || 'sms.customlinux.org'}/api/webhooks/sms`);
+  const [webhookUrl, setWebhookUrl] = useState(`https://gateway.${domain || 'sms.customlinux.org'}/api/webhooks/inbound-sms`);
   const [dkimBits, setDkimBits] = useState<'2048' | '4096'>('2048');
   const [mtaStsMode, setMtaStsMode] = useState<'enforce' | 'testing'>('enforce');
   const [enablePostscreen, setEnablePostscreen] = useState(true);
@@ -190,7 +190,7 @@ smtps     inet  n       -       y       -       -       smtpd
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
 
-# Unprivileged Carrier Pipe for 1,000 Working Virtual Numbers
+# Unprivileged Self-Hosted Pipe for 1,000 Working Virtual Numbers
 apex-carrier-pipe unix - n n - 10 pipe
   flags=FRq user=apexcarrier null_sender= argv=/usr/local/bin/apex-carrier-pipe.py \${recipient}`;
 
@@ -295,7 +295,7 @@ logpath  = /var/log/mail.log
 maxretry = 3
 bantime  = 86400`;
 
-  const asteriskPjsipContent = `# 1. /etc/asterisk/rtp.conf — 10,000 UDP Ports (Up to 2,500-5,000 Concurrent Voice Streams)
+  const asteriskPjsipContent = `# 1. /etc/asterisk/rtp.conf — 10,000 UDP Ports (Self-Hosted Concurrent Voice Streams)
 [general]
 rtpstart=10000
 rtpend=20000
@@ -314,25 +314,18 @@ permit = 127.0.0.1/255.255.255.255
 read = system,call,log,verbose,command,agent,user,originate
 write = system,call,log,verbose,command,agent,user,originate
 
-# 3. /etc/asterisk/pjsip.conf — Public SIP-TLS (5061) & Outbound Carrier Trunk
-[transport-tls]
-type=transport
-protocol=tls
-bind=${safeIp}:5061
-cert_file=/etc/letsencrypt/live/mx1.${safeDomain}/fullchain.pem
-priv_key_file=/etc/letsencrypt/live/mx1.${safeDomain}/privkey.pem
-method=tlsv1_3
+# 3. /etc/asterisk/extensions.conf — 100% Self-Hosted Dialplan (No Paid Trunk Needed)
+[carrier-selfhosted]
+exten => _1201555XXXX,1,NoOp(Self-hosted DID call from \${CALLERID(num)} to \${EXTEN})
+ same => n,Dial(PJSIP/did_\${EXTEN},30)
+ same => n,Hangup()
 
-[carrier-sip-trunk]
-type=endpoint
-transport=transport-tls
-context=carrier-inbound
-disallow=all
-allow=opus,ulaw,alaw
-aors=carrier-sip-trunk
-media_encryption=sdes
+; Federated SIP URI Calling across independent Linux nodes
+exten => _[a-zA-Z0-9._-].,1,NoOp(Federated SIP call to \${EXTEN}@\${SIPDOMAIN})
+ same => n,Dial(PJSIP/\${EXTEN}@\${SIPDOMAIN},30)
+ same => n,Hangup()
 
-# Download full 1,000 DID endpoints via: /api/export/asterisk-pjsip?domain=${safeDomain}&ip=${safeIp}`;
+# Download full 1,000 self-hosted endpoints: /api/export/asterisk-pjsip?domain=${safeDomain}&ip=${safeIp}`;
 
   const kernelSystemdContent = `# 1. /etc/sysctl.d/99-linux-carrier-1000.conf — 1,000 Concurrent Calling + SMS Kernel Tuning
 fs.file-max = 2097152

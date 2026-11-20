@@ -67,12 +67,14 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
   const [batchCount, setBatchCount] = useState(1000);
   const [batchLoading, setBatchLoading] = useState(false);
 
-  // Edit Single Number Drawer
+  // Edit Single Number Modal
   const [editingNumber, setEditingNumber] = useState<VirtualNumber | null>(null);
   const [editLabel, setEditLabel] = useState('');
   const [editStatus, setEditStatus] = useState<VirtualNumber['status']>('active');
-  const [editGateway, setEditGateway] = useState('');
+  const [editRoutingMode, setEditRoutingMode] = useState<VirtualNumber['routingMode']>('self-hosted');
   const [editWebhook, setEditWebhook] = useState('');
+  const [editVoiceEnabled, setEditVoiceEnabled] = useState(true);
+  const [editSmsEnabled, setEditSmsEnabled] = useState(true);
   const [savingEdit, setSavingEdit] = useState(false);
 
   useEffect(() => {
@@ -120,8 +122,10 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
     setEditingNumber(num);
     setEditLabel(num.label);
     setEditStatus(num.status);
-    setEditGateway(num.carrierGateway);
+    setEditRoutingMode(num.routingMode || 'self-hosted');
     setEditWebhook(num.webhookUrl);
+    setEditVoiceEnabled(num.voiceEnabled);
+    setEditSmsEnabled(num.smsEnabled);
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
@@ -135,8 +139,10 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
         body: JSON.stringify({
           label: editLabel,
           status: editStatus,
-          carrierGateway: editGateway,
-          webhookUrl: editWebhook
+          routingMode: editRoutingMode,
+          webhookUrl: editWebhook,
+          voiceEnabled: editVoiceEnabled,
+          smsEnabled: editSmsEnabled
         })
       });
       if (res.ok) {
@@ -193,15 +199,15 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-cyan-400 font-medium">
               <Server className="w-3.5 h-3.5" />
-              <span>Publicly Delegated Linux SMTP Trunk</span>
+              <span>100% Self-Hosted Linux Telephony &amp; SMTP Switch (No External Carrier)</span>
               <span aria-hidden="true" className="text-slate-600">·</span>
               <span className="font-mono text-slate-300">{domain}</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-50 max-w-2xl" style={{ textWrap: 'balance' }}>
-              1,000 Working Numbers for Voice Calling &amp; SMS
+              1,000 Working Numbers for Calling &amp; SMS
             </h1>
             <p className="text-sm text-slate-400 max-w-2xl leading-relaxed">
-              Every DID in this 1,000-line pool maps to a dedicated Postfix Port 25 virtual alias for SMS and an Asterisk PJSIP endpoint (<span className="font-mono text-slate-200">did_1201555xxxx</span>) for SIP/RTP voice calling, backed by persistent disk storage.
+              Every DID in this 1,000-line pool operates independently on your Linux host: direct Postfix/RFC 5321 SMTP for SMS, embedded SIP UDP registrar (<span className="font-mono text-slate-200">sip:1201555xxxx@{domain}</span>), and live browser WebRTC audio calling with zero third-party carrier dependencies.
             </p>
           </div>
 
@@ -225,7 +231,7 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
               </div>
             </div>
             <div>
-              <div className="text-xs text-slate-400">SIP Voice Calls</div>
+              <div className="text-xs text-slate-400">Self-Hosted Calls</div>
               <div className="text-xl font-bold font-mono tabular-nums text-slate-200 mt-0.5">
                 {(stats.totalCalls || 0).toLocaleString()}
               </div>
@@ -248,14 +254,14 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
             <div className="absolute bottom-3 left-4 right-4 flex items-center justify-between text-xs text-slate-200">
               <span className="font-medium flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                Postfix + TLS 1.3 Ready
+                Zero-Carrier Self-Hosted Stack
               </span>
-              <span className="font-mono text-slate-300">TCP/25</span>
+              <span className="font-mono text-slate-300">SMTP + SIP</span>
             </div>
           </div>
           <div className="p-4 flex-1 flex flex-col justify-between gap-3">
             <p className="text-xs text-slate-400 leading-relaxed">
-              Re-delegate all 1,000 numbers or export your Postfix SMTP map and Asterisk PJSIP 1,000-endpoint voice configuration.
+              Re-delegate all 1,000 numbers to your domain or export Postfix SMTP maps and 1,000 self-hosted Asterisk PJSIP endpoints.
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -292,13 +298,12 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by phone number, extension (0001–1000), email, or label..."
+            placeholder="Search by phone number, extension (0001–1000), SIP URI, email, or label..."
             className="w-full pl-9 pr-4 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-500 transition-colors"
           />
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Segmented Filter Control */}
           <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
             {(['all', 'active', 'reserved', 'idle'] as const).map((statusKey) => (
               <button
@@ -336,11 +341,12 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
               <tr className="border-b border-slate-800 bg-slate-950/60 text-xs font-medium text-slate-400">
                 <th className="py-3 px-4 w-20">Ext</th>
                 <th className="py-3 px-4">Virtual Number</th>
-                <th className="py-3 px-4">SMTP Virtual Alias</th>
-                <th className="py-3 px-4">Default Route</th>
-                <th className="py-3 px-4">Assignment Label</th>
+                <th className="py-3 px-4">SMTP Address</th>
+                <th className="py-3 px-4">SIP URI</th>
+                <th className="py-3 px-4">Routing Mode</th>
+                <th className="py-3 px-4">Label</th>
                 <th className="py-3 px-4 text-right">Last OTP</th>
-                <th className="py-3 px-4 text-right">Rx / Tx</th>
+                <th className="py-3 px-4 text-right">Rx / Tx / Calls</th>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4 text-right">Actions</th>
               </tr>
@@ -348,21 +354,22 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
             <tbody className="divide-y divide-slate-800/70 text-sm">
               {loading && numbers.length === 0 ? (
                 Array.from({ length: 8 }).map((_, idx) => (
-                  <tr key={idx} className="animate-pulse">
+                  <tr key={idx}>
                     <td className="py-3 px-4"><div className="h-4 w-10 bg-slate-800 rounded" /></td>
                     <td className="py-3 px-4"><div className="h-4 w-32 bg-slate-800 rounded" /></td>
-                    <td className="py-3 px-4"><div className="h-4 w-48 bg-slate-800 rounded" /></td>
-                    <td className="py-3 px-4"><div className="h-4 w-24 bg-slate-800 rounded" /></td>
-                    <td className="py-3 px-4"><div className="h-4 w-36 bg-slate-800 rounded" /></td>
+                    <td className="py-3 px-4"><div className="h-4 w-44 bg-slate-800 rounded" /></td>
+                    <td className="py-3 px-4"><div className="h-4 w-44 bg-slate-800 rounded" /></td>
+                    <td className="py-3 px-4"><div className="h-4 w-20 bg-slate-800 rounded" /></td>
+                    <td className="py-3 px-4"><div className="h-4 w-28 bg-slate-800 rounded" /></td>
                     <td className="py-3 px-4"><div className="h-4 w-14 bg-slate-800 rounded ml-auto" /></td>
-                    <td className="py-3 px-4"><div className="h-4 w-12 bg-slate-800 rounded ml-auto" /></td>
+                    <td className="py-3 px-4"><div className="h-4 w-16 bg-slate-800 rounded ml-auto" /></td>
                     <td className="py-3 px-4"><div className="h-4 w-14 bg-slate-800 rounded" /></td>
                     <td className="py-3 px-4"><div className="h-4 w-20 bg-slate-800 rounded ml-auto" /></td>
                   </tr>
                 ))
               ) : numbers.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400">
+                  <td colSpan={10} className="py-12 text-center text-slate-400">
                     <p className="text-sm font-medium text-slate-300">No virtual numbers match your query</p>
                     <p className="text-xs text-slate-500 mt-1">Try clearing your search or switching the status filter.</p>
                   </td>
@@ -376,6 +383,9 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
                     <td className="py-2.5 px-4 font-mono tabular-nums font-medium text-slate-100 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         <span>{num.phoneNumber}</span>
+                        {num.sipRegistered && (
+                          <span className="text-[10px] font-sans font-semibold text-emerald-400">Online</span>
+                        )}
                         <button
                           onClick={() => handleCopy(num.e164, num.id)}
                           title="Copy E.164"
@@ -392,10 +402,13 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
                     <td className="py-2.5 px-4 font-mono text-xs text-slate-300 whitespace-nowrap">
                       {num.assignedEmail}
                     </td>
-                    <td className="py-2.5 px-4 font-mono text-xs text-slate-400 whitespace-nowrap">
-                      {num.carrierGateway}
+                    <td className="py-2.5 px-4 font-mono text-xs text-cyan-300/90 whitespace-nowrap">
+                      {num.sipUri}
                     </td>
-                    <td className="py-2.5 px-4 text-xs text-slate-300 max-w-[200px] truncate">
+                    <td className="py-2.5 px-4 font-mono text-xs text-slate-400 whitespace-nowrap">
+                      {num.routingMode}
+                    </td>
+                    <td className="py-2.5 px-4 text-xs text-slate-300 max-w-[180px] truncate">
                       {num.label}
                     </td>
                     <td className="py-2.5 px-4 text-right font-mono tabular-nums text-xs">
@@ -412,7 +425,7 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
                       )}
                     </td>
                     <td className="py-2.5 px-4 text-right font-mono tabular-nums text-xs text-slate-300 whitespace-nowrap">
-                      {num.totalReceived} / {num.totalSent}
+                      {num.totalReceived} / {num.totalSent} / {num.totalCalls || 0}
                     </td>
                     <td className="py-2.5 px-4 text-xs whitespace-nowrap">
                       {renderStatusText(num.status)}
@@ -422,14 +435,14 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
                         <button
                           onClick={() => onQuickSimulate(num)}
                           className="px-2 py-1 text-xs font-medium text-cyan-400 hover:text-cyan-300 hover:bg-slate-800 rounded transition-colors"
-                          title="Simulate Inbound SMS to this number"
+                          title="Deliver direct SMTP test SMS to this line"
                         >
                           Test Rx
                         </button>
                         <button
                           onClick={() => onQuickCompose(num)}
                           className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded transition-colors"
-                          title="Send Outbound SMS from this number"
+                          title="Open Voice & SMS Console with this DID"
                         >
                           <Send className="w-3.5 h-3.5" />
                         </button>
@@ -484,7 +497,7 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
           <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-md p-6 space-y-5 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
-                <h3 className="text-base font-semibold text-slate-100">Configure Virtual DID</h3>
+                <h3 className="text-base font-semibold text-slate-100">Configure Self-Hosted DID</h3>
                 <p className="text-xs font-mono text-cyan-400 mt-0.5">{editingNumber.phoneNumber}</p>
               </div>
               <button
@@ -522,18 +535,38 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Carrier Gateway</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Routing Mode</label>
                   <select
-                    value={editGateway}
-                    onChange={(e) => setEditGateway(e.target.value)}
+                    value={editRoutingMode}
+                    onChange={(e) => setEditRoutingMode(e.target.value as VirtualNumber['routingMode'])}
                     className="w-full px-3 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-cyan-500"
                   >
-                    <option value="vtext.com">vtext.com (Verizon)</option>
-                    <option value="txt.att.net">txt.att.net (AT&T)</option>
-                    <option value="tmomail.net">tmomail.net (T-Mobile)</option>
-                    <option value="direct-smtp">direct-smtp</option>
+                    <option value="self-hosted">self-hosted</option>
+                    <option value="federated-sip">federated-sip</option>
+                    <option value="webhook">webhook</option>
                   </select>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none p-2.5 bg-slate-950 border border-slate-800 rounded-lg">
+                  <input
+                    type="checkbox"
+                    checked={editVoiceEnabled}
+                    onChange={(e) => setEditVoiceEnabled(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-900 text-cyan-400"
+                  />
+                  <span>SIP / WebRTC Voice</span>
+                </label>
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none p-2.5 bg-slate-950 border border-slate-800 rounded-lg">
+                  <input
+                    type="checkbox"
+                    checked={editSmsEnabled}
+                    onChange={(e) => setEditSmsEnabled(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-900 text-cyan-400"
+                  />
+                  <span>SMTP Port 25 SMS</span>
+                </label>
               </div>
 
               <div>
@@ -542,7 +575,7 @@ export const NumbersFleetView: React.FC<NumbersFleetViewProps> = ({
                   type="url"
                   value={editWebhook}
                   onChange={(e) => setEditWebhook(e.target.value)}
-                  placeholder={`https://gateway.${domain}/api/webhooks/sms`}
+                  placeholder={`https://gateway.${domain}/api/webhooks/inbound-sms`}
                   className="w-full px-3 py-2 text-sm font-mono bg-slate-950 border border-slate-800 rounded-lg text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500"
                 />
               </div>
