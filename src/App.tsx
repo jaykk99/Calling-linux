@@ -5,6 +5,7 @@ import { LiveConsoleView } from './components/LiveConsoleView';
 import { LinuxAuditView } from './components/LinuxAuditView';
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { DeploymentView } from './components/DeploymentView';
+import { AgentMailPanel } from './components/AgentMailPanel';
 import { SimulateInboundModal } from './components/SimulateInboundModal';
 import { VirtualNumber } from './types';
 
@@ -48,6 +49,7 @@ export default function App() {
         {[
           { id: 'fleet', label: 'Fleet' },
           { id: 'console', label: 'Voice & SMS' },
+          { id: 'agent-mail', label: 'Agent Mail' },
           { id: 'audit', label: 'Linux Audit' },
           { id: 'diagnostics', label: 'Port 25' },
           { id: 'deployment', label: 'Deployment' }
@@ -84,6 +86,8 @@ export default function App() {
             refreshTrigger={refreshTrigger}
           />
         )}
+
+        {activeTab === 'agent-mail' && <AgentMailPanel />}
 
         {activeTab === 'audit' && <LinuxAuditView />}
 

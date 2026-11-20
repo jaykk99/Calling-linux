@@ -14,6 +14,7 @@ export const TopNav: React.FC<TopNavProps> = ({
   const navItems = [
     { id: 'fleet', label: 'Numbers Fleet' },
     { id: 'console', label: 'Voice & SMS' },
+    { id: 'agent-mail', label: 'Agent Mail' },
     { id: 'audit', label: 'Linux Audit' },
     { id: 'diagnostics', label: 'Port 25 & Net' },
     { id: 'deployment', label: 'Deployment' }

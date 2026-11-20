@@ -15,7 +15,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+// Port is env-configurable so the dashboard can share a box with the mail
+// API (:3000): the combined start path runs Calling-linux on :3001.
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
 app.use(
   express.json({
@@ -118,21 +120,17 @@ function generate1000Numbers(domain: string = 'sms.customlinux.org', prefix: str
     let lastOtp: string | undefined = undefined;
     let totalReceived = 0;
 
+    // Display labels only. Counters start at 0 and no OTP is ever seeded:
+    // a verification code that was never received must not appear here.
     if (i === 1) {
       status = 'active';
       label = 'Primary Switchboard & Dispatch';
-      totalReceived = 12;
-      lastOtp = '729104';
     } else if (i === 2) {
       status = 'active';
       label = 'Self-Hosted Auth Receiver';
-      totalReceived = 8;
-      lastOtp = '519283';
     } else if (i === 42) {
       status = 'active';
       label = 'API Webhook & SIP Line #42';
-      totalReceived = 19;
-      lastOtp = '904128';
     } else if (i > 800 && i <= 850) {
       status = 'reserved';
       label = `Reserved Line #${i}`;
@@ -160,7 +158,7 @@ function generate1000Numbers(domain: string = 'sms.customlinux.org', prefix: str
       smsEnabled: status !== 'idle',
       totalReceived,
       totalSent: Math.floor(totalReceived / 2),
-      totalCalls: i === 1 ? 4 : i === 2 ? 4 : 0,
+      totalCalls: 0,
       lastActive: totalReceived > 0 ? now : 'Never',
       lastOtp
     });
@@ -207,23 +205,8 @@ function loadPersistedState() {
   }
 
   numbersStore = generate1000Numbers(currentDomain);
-  messagesStore = [
-    {
-      id: 'msg-seed-001',
-      direction: 'internal',
-      from: '+1 (201) 555-0002',
-      to: '+1 (201) 555-0001',
-      body: 'Self-hosted Linux SMTP switch active. Verification code: 729104.',
-      timestamp: new Date(Date.now() - 1000 * 60 * 8).toISOString(),
-      transport: `Direct Linux SMTP (${currentDomain})`,
-      otpCode: '729104',
-      status: 'delivered',
-      deliveryMode: 'self-hosted-direct',
-      port25Verified: true,
-      tlsCipher: 'TLSv1.3 Self-Hosted',
-      rawMime: `From: <12015550002@${currentDomain}>\nTo: <12015550001@${currentDomain}>\nSubject: Direct Self-Hosted SMS\n\nSelf-hosted Linux SMTP switch active. Verification code: 729104.`
-    }
-  ];
+  // No seeded messages: an inbox starts empty until real mail arrives.
+  messagesStore = [];
   callsStore = [];
   savePersistedState();
 }
@@ -296,6 +279,11 @@ function broadcastPresence() {
 
 // ----------------- EMBEDDED SELF-HOSTED RFC 3261 SIP UDP SERVER ----------------- //
 let embeddedSipPort: number | null = null;
+// Unauthenticated SIP REGISTER is OFF by default. The embedded registrar
+// accepts REGISTER without credentials, which is a hole if the UDP port is
+// ever exposed: set SIP_ALLOW_UNAUTH_REGISTER=1 only on localhost, only
+// when you mean it. OPTIONS still answers when the gate is closed.
+const SIP_ALLOW_UNAUTH_REGISTER = process.env.SIP_ALLOW_UNAUTH_REGISTER === '1';
 const sipRegistrations = new Map<string, { contact: string; address: string; port: number; expiresAt: number }>();
 
 function startEmbeddedSipUdpServer() {
@@ -372,19 +360,24 @@ function startEmbeddedSipUdpServer() {
         const resp = buildSipResponse(200, 'OK', 'Allow: REGISTER, INVITE, ACK, BYE, CANCEL, OPTIONS');
         server.send(Buffer.from(resp), rinfo.port, rinfo.address);
       } else if (method === 'REGISTER') {
-        const matched = findNumberByAnyIdentifier(fromUser);
-        if (matched) {
-          sipRegistrations.set(matched.e164, {
-            contact: contact || `sip:${fromUser}@${rinfo.address}:${rinfo.port}`,
-            address: rinfo.address,
-            port: rinfo.port,
-            expiresAt: Date.now() + 3600 * 1000
-          });
-          const resp = buildSipResponse(200, 'OK', `Expires: 3600`);
+        if (!SIP_ALLOW_UNAUTH_REGISTER) {
+          const resp = buildSipResponse(403, 'Forbidden - unauthenticated REGISTER disabled (set SIP_ALLOW_UNAUTH_REGISTER=1 on localhost to opt in)');
           server.send(Buffer.from(resp), rinfo.port, rinfo.address);
         } else {
-          const resp = buildSipResponse(404, 'Not Found');
-          server.send(Buffer.from(resp), rinfo.port, rinfo.address);
+          const matched = findNumberByAnyIdentifier(fromUser);
+          if (matched) {
+            sipRegistrations.set(matched.e164, {
+              contact: contact || `sip:${fromUser}@${rinfo.address}:${rinfo.port}`,
+              address: rinfo.address,
+              port: rinfo.port,
+              expiresAt: Date.now() + 3600 * 1000
+            });
+            const resp = buildSipResponse(200, 'OK', `Expires: 3600`);
+            server.send(Buffer.from(resp), rinfo.port, rinfo.address);
+          } else {
+            const resp = buildSipResponse(404, 'Not Found');
+            server.send(Buffer.from(resp), rinfo.port, rinfo.address);
+          }
         }
       } else if (method === 'INVITE') {
         const targetNum = findNumberByAnyIdentifier(toUser);
@@ -1365,6 +1358,38 @@ function readProcStr(procPath: string): string {
   }
 }
 
+// ----------------- AGENT MAIL STATUS (LIVE PROXY, NEVER INVENTED) ----------------- //
+
+const AGENT_MAIL_URL = (process.env.AGENT_MAIL_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
+
+app.get('/api/agent-mail/status', async (_req: Request, res: Response) => {
+  try {
+    const upstream = await fetch(`${AGENT_MAIL_URL}/health`, {
+      signal: AbortSignal.timeout(2000),
+      headers: { Accept: 'application/json' }
+    });
+    if (!upstream.ok) {
+      res.json({ live: false, url: AGENT_MAIL_URL, error: `mail API HTTP ${upstream.status}` });
+      return;
+    }
+    const health: any = await upstream.json();
+    res.json({
+      live: true,
+      url: AGENT_MAIL_URL,
+      domain: health.domain ?? null,
+      addresses: typeof health.addresses === 'number' ? health.addresses : null,
+      accounts: typeof health.accounts === 'number' ? health.accounts : null,
+      storage: health.storage ?? null,
+      signup: health.signup ?? null,
+      outbound: health.outbound ?? null,
+      outboundConfigured: Boolean(health.outboundConfigured),
+      deadLetters: typeof health.deadLetters === 'number' ? health.deadLetters : null
+    });
+  } catch (err: any) {
+    res.json({ live: false, url: AGENT_MAIL_URL, error: err?.name === 'TimeoutError' ? 'mail API timed out' : 'mail API unreachable' });
+  }
+});
+
 app.get('/api/system/capabilities', async (_req: Request, res: Response) => {
   const cpus = os.cpus();
   const totalMemMb = Math.round(os.totalmem() / (1024 * 1024));
@@ -2184,6 +2209,9 @@ app.get('/api/export/dovecot-users', (req: Request, res: Response) => {
   const lines = [
     `# /etc/dovecot/users — Unified 1,000-Mailbox Passwd-File for ${domain}`,
     `# Generate real hashes with: doveadm pw -s SHA512-CRYPT -p <PASSWORD>`,
+    `# or with agent-mail-service: python3 phone/calling_linux_mailboxes.py`,
+    `#   --state-dir ./phone-data --domain ${domain} --out .generated/calling-linux-mail`,
+    `# Placeholders are never valid credentials; replace every hash before use.`,
     ''
   ];
   numbersStore.forEach((n) => {
